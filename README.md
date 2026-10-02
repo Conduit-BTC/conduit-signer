@@ -213,7 +213,7 @@ authority.
 | LS-03 | IndexedDB recreation, frame/parent reload and actual local-server outage restoration                             | Physical iPhone Safari/PWA persistence, device/iOS, separate imports and offline cold launch                       |
 | LS-04 | Real signing, independent-peer NIP-44/legacy decrypt and kind-14/kind-16 NIP-59 interoperability                 | Existing shared account/session adapter, protected reads and composed Market/Merchant flows                        |
 | LS-05 | Conditional record deletion, revision/frame/correlation fences, pending cancellation, cross-view logout/reimport | Physical suspension/relaunch and per-partition logout, composed auth lifecycle                                     |
-| LS-06 | Content-free UI/errors and scoped CSPRNG fixture policy checks                                                   | Protected client-policy confirmation, maintainer threat sign-off and hosted privacy review                         |
+| LS-06 | Content-free UI/errors and scoped CSPRNG fixture policy checks                                                   | Merged client-policy update, maintainer threat sign-off and hosted privacy review                                  |
 | LS-07 | Focused crypto/lifecycle/policy tests, strict typecheck, lint, formatting, build and browser checks              | Current-head hosted CI, two retained WebKit offline-emulation failures, physical iPhone and product smoke coverage |
 
 The probe-shell smoke/Playwright suite adds boundary, import/restore, crypto,
