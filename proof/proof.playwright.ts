@@ -1,0 +1,336 @@
+import { expect, test } from "@playwright/test"
+import { spawn } from "node:child_process"
+import { once } from "node:events"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+
+test("exact parent origin and source are required; parent ignores forged changes", async ({
+  page,
+}) => {
+  await page.goto("http://localhost:7030")
+  const frame = page.frames().find((f) => f.url() === "http://localhost:7032/")!
+  await expect(page.frameLocator("iframe").locator("#state")).toContainText(
+    "No stored record",
+  )
+  await page.evaluate(() => {
+    const root = window as Window & { proofResponses?: number }
+    root.proofResponses = 0
+    window.addEventListener("message", (e) => {
+      if (e.data?.id === "boundary-test") root.proofResponses!++
+    })
+  })
+  const request = {
+    version: "conduit-signer-proof-1",
+    id: "boundary-test",
+    channel: "boundary-test",
+    frame: null,
+    binding: null,
+    method: "status",
+  }
+  await frame.evaluate((data) => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data,
+        origin: "https://unapproved.example",
+        source: window.parent,
+      }),
+    )
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data,
+        origin: "http://localhost:7030",
+        source: window,
+      }),
+    )
+  }, request)
+  await page.waitForTimeout(100)
+  expect(
+    await page.evaluate(
+      () => (window as Window & { proofResponses?: number }).proofResponses,
+    ),
+  ).toBe(0)
+  await page.evaluate(
+    (data) =>
+      document
+        .querySelector("iframe")!
+        .contentWindow!.postMessage(data, "http://localhost:7032"),
+    request,
+  )
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { proofResponses?: number }).proofResponses,
+      ),
+    )
+    .toBe(1)
+  await page.getByRole("button", { name: "Check status" }).click()
+  await expect(page.locator("#result")).toContainText("Disconnected")
+  await page.evaluate(() => {
+    const data = { version: "conduit-signer-proof-1", changed: true }
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data,
+        origin: "https://unapproved.example",
+        source: document.querySelector("iframe")!.contentWindow,
+      }),
+    )
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data,
+        origin: "http://localhost:7032",
+        source: window,
+      }),
+    )
+  })
+  await expect(page.locator("#result")).toContainText("Disconnected")
+})
+
+test("headers bound embedding and server rejects data-bearing requests", async ({
+  request,
+}) => {
+  const signer = await request.get("http://localhost:7032")
+  const policy = signer.headers()["content-security-policy"]
+  expect(
+    policy.includes(
+      "frame-ancestors http://localhost:7030 http://localhost:7031;",
+    ),
+  ).toBe(true)
+  expect(policy.includes("form-action 'none'")).toBe(true)
+  expect(signer.headers()["access-control-allow-origin"]).toBeUndefined()
+  expect((await request.post("http://localhost:7032")).status()).toBe(404)
+  expect((await request.get("http://localhost:7032/?invalid=1")).status()).toBe(
+    404,
+  )
+})
+
+for (const [name, port] of [
+  ["Market", 7030],
+  ["Merchant", 7031],
+] as const) {
+  test(`${name}: isolated import, restore, crypto, offline, logout and reimport`, async ({
+    page,
+    context,
+  }) => {
+    const requests: { origin: string; method: string; query: boolean }[] = []
+    page.on("request", (r) => {
+      const u = new URL(r.url())
+      requests.push({ origin: u.origin, method: r.method(), query: !!u.search })
+    })
+    await page.goto(`http://localhost:${port}`)
+    let signer = page.frameLocator("iframe")
+    await expect(signer.locator("#state")).toContainText("No stored record")
+    await signer
+      .getByRole("button", { name: "Prepare disposable import" })
+      .click()
+    await signer.getByRole("checkbox").check()
+    await signer.getByRole("button", { name: "Import test key" }).click()
+    await expect(signer.locator("#state")).toContainText(
+      "Stored record available",
+    )
+    expect(
+      await page.evaluate(
+        () => document.querySelector("iframe")!.contentDocument === null,
+      ),
+    ).toBe(true)
+    expect(
+      await page.evaluate(async () => (await indexedDB.databases()).length),
+    ).toBe(0)
+    await page.getByRole("button", { name: "Check status" }).click()
+    await expect(page.locator("#result")).toContainText("Connected")
+    await page.getByRole("button", { name: "Verify signing" }).click()
+    await expect(page.locator("#result")).toContainText("PASS: exact template")
+    await page.getByRole("button", { name: "Verify NIP-44" }).click()
+    await expect(page.locator("#result")).toContainText("PASS: NIP-44")
+    await page.getByRole("button", { name: "Replace signer frame" }).click()
+    signer = page.frameLocator("iframe")
+    await expect(signer.locator("#state")).toContainText(
+      "Stored record available",
+    )
+    await page.reload()
+    await expect(signer.locator("#state")).toContainText(
+      "Stored record available",
+    )
+    await page.getByRole("button", { name: "Check status" }).click()
+    await expect(page.locator("#result")).toContainText("Connected")
+    await context.setOffline(true)
+    await page.getByRole("button", { name: "Verify NIP-44" }).click()
+    await expect(page.locator("#result")).toContainText("PASS: NIP-44")
+    await context.setOffline(false)
+    await page.getByRole("button", { name: "Log out signer" }).click()
+    await expect(page.locator("#result")).toContainText("Logged out")
+    await page.reload()
+    await expect(signer.locator("#state")).toContainText("No stored record")
+    await page.getByRole("button", { name: "Check status" }).click()
+    await expect(page.locator("#result")).toContainText("Disconnected")
+    await signer
+      .getByRole("button", { name: "Prepare disposable import" })
+      .click()
+    await signer.getByRole("checkbox").check()
+    await signer.getByRole("button", { name: "Import test key" }).click()
+    await expect(signer.locator("#state")).toContainText(
+      "Stored record available",
+    )
+    await page.getByRole("button", { name: "Check status" }).click()
+    await page.getByRole("button", { name: "Verify signing" }).click()
+    await expect(page.locator("#result")).toContainText("PASS: exact template")
+    expect(
+      requests.every(
+        (r) =>
+          [
+            "http://localhost:7030",
+            "http://localhost:7031",
+            "http://localhost:7032",
+          ].includes(r.origin) &&
+          r.method === "GET" &&
+          !r.query,
+      ),
+    ).toBe(true)
+    await signer.getByRole("button", { name: "Forget local test key" }).click()
+  })
+}
+
+for (const [name, port] of [
+  ["Market", 7060],
+  ["Merchant", 7061],
+] as const) {
+  test(`${name}: actual server outage restores signer and offline authority`, async ({
+    page,
+    context,
+  }) => {
+    const output = await mkdtemp(join(tmpdir(), "conduit-signer-proof-"))
+    const child = spawn(
+      "bun",
+      [fileURLToPath(new URL("./server.ts", import.meta.url))],
+      {
+        stdio: "ignore",
+        env: {
+          PATH: process.env.PATH,
+          PROOF_MARKET_ORIGIN: "http://localhost:7060",
+          PROOF_MARKET_PORT: "7060",
+          PROOF_MERCHANT_ORIGIN: "http://localhost:7061",
+          PROOF_MERCHANT_PORT: "7061",
+          PROOF_SIGNER_ORIGIN: "http://localhost:7062",
+          PROOF_SIGNER_PORT: "7062",
+          PROOF_OUTPUT_DIR: output,
+        },
+      },
+    )
+    try {
+      await expect
+        .poll(async () => {
+          try {
+            return (await fetch("http://localhost:7060")).ok
+          } catch {
+            return false
+          }
+        })
+        .toBe(true)
+      await page.goto(`http://localhost:${port}`)
+      const frame = page.frameLocator("iframe")
+      await frame
+        .getByRole("button", { name: "Prepare disposable import" })
+        .click()
+      await frame.getByRole("checkbox").check()
+      await frame.getByRole("button", { name: "Import test key" }).click()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.evaluate(async () => {
+        await navigator.serviceWorker.ready
+      })
+      await page
+        .frames()
+        .find((f) => f.url() === "http://localhost:7062/")!
+        .evaluate(async () => {
+          await navigator.serviceWorker.ready
+        })
+      await page.reload()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      const stopped = once(child, "exit")
+      child.kill("SIGTERM")
+      await stopped
+      await page.reload()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.getByRole("button", { name: "Check status" }).click()
+      await expect(page.locator("#result")).toContainText("Connected")
+      await page.getByRole("button", { name: "Verify signing" }).click()
+      await expect(page.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await page.getByRole("button", { name: "Verify NIP-44" }).click()
+      await expect(page.locator("#result")).toContainText("PASS: NIP-44")
+      await page.getByRole("button", { name: "Replace signer frame" }).click()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.getByRole("button", { name: "Check status" }).click()
+      await expect(page.locator("#result")).toContainText("Connected")
+      await page.close()
+      const relaunched = await context.newPage()
+      await relaunched.goto(`http://localhost:${port}`)
+      const restored = relaunched.frameLocator("iframe")
+      await expect(restored.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await relaunched.getByRole("button", { name: "Check status" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Connected")
+      await relaunched.getByRole("button", { name: "Verify signing" }).click()
+      await expect(relaunched.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await relaunched.getByRole("button", { name: "Verify NIP-44" }).click()
+      await expect(relaunched.locator("#result")).toContainText("PASS: NIP-44")
+      await relaunched.getByRole("button", { name: "Log out signer" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Logged out")
+      await relaunched.reload()
+      await expect(restored.locator("#state")).toContainText("No stored record")
+      await restored
+        .getByRole("button", { name: "Prepare disposable import" })
+        .click()
+      await restored.getByRole("checkbox").check()
+      await restored.getByRole("button", { name: "Import test key" }).click()
+      await relaunched.getByRole("button", { name: "Check status" }).click()
+      await relaunched.getByRole("button", { name: "Verify signing" }).click()
+      await expect(relaunched.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await relaunched.getByRole("button", { name: "Log out signer" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Logged out")
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const stopped = once(child, "exit")
+        child.kill("SIGTERM")
+        await stopped
+      }
+      await rm(output, { recursive: true, force: true })
+    }
+  })
+}
+test("same storage partition logout revokes the other view", async ({
+  context,
+}) => {
+  const a = await context.newPage()
+  const b = await context.newPage()
+  await a.goto("http://localhost:7030")
+  await b.goto("http://localhost:7030")
+  const frame = a.frameLocator("iframe")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("checkbox").check()
+  await frame.getByRole("button", { name: "Import test key" }).click()
+  await expect(frame.locator("#state")).toContainText("Stored record available")
+  for (const p of [a, b]) {
+    await p.getByRole("button", { name: "Check status" }).click()
+    await expect(p.locator("#result")).toContainText("Connected")
+  }
+  await a.getByRole("button", { name: "Log out signer" }).click()
+  await expect(a.locator("#result")).toContainText("Logged out")
+  await expect(b.locator("#result")).toContainText("Signer changed")
+  await b.getByRole("button", { name: "Verify signing" }).click()
+  await expect(b.locator("#result")).toContainText("disconnected")
+})
