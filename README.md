@@ -59,6 +59,7 @@ bun run typecheck
 bun run lint
 bun run format:check
 bun run test:browser
+bun run test:browser:diagnostic
 bun run build
 ```
 
@@ -78,15 +79,19 @@ composed Market/Merchant integration remains gated.
 
 ### Observed desktop limitation
 
-The complete browser command intentionally retains two failing WebKit offline
-emulation reload probes (one per parent). Chromium passes these probes. Desktop
-WebKit passes restoration and signing when the local origin servers are actually
-stopped instead of using `context.setOffline(true)`. This matches the failure
-reported in [Playwright #42775](https://github.com/microsoft/playwright/issues/42775);
-it is evidence of an emulation limitation, not proof of physical-iPhone behavior
-or key-storage loss. The probes remain assertions, without retries or expected-
-failure suppression. Their command exits nonzero until the limitation is resolved.
-The other checks continue in independent cases, including logout and reimport.
+The diagnostic command retains two failing WebKit offline-emulation reload
+probes (one per parent). Chromium passes these probes. This matches the failure
+reported in [Playwright #42775](https://github.com/microsoft/playwright/issues/42775).
+The assertions are unchanged, without retries or expected-failure suppression;
+the diagnostic command exits nonzero while the limitation remains. A separate
+manual **Browser diagnostics** workflow reproduces it without changing required
+signer validation. This is an emulation gap, not physical-iPhone evidence.
+
+Required browser checks use an actual outage of all three local servers for
+each parent in Chromium and WebKit. They check durable restore, verified signing,
+NIP-44, frame replacement, closing/reopening a page, logout and reimport while
+the servers remain stopped. Loaded-page network emulation remains in the normal
+lifecycle checks. Browser page reopening is not iOS process termination.
 
 Runtime disposable fixture generation is a narrowly scoped development
 exception. The fixture button is test equipment; it must be removed before any
@@ -203,6 +208,27 @@ passkeys, a native signer or recovery infrastructure.
 See [the security review](SECURITY.md) for the remaining approval and integration
 boundaries. The approved local-key policy does not grant deployment or release
 authority.
+
+## CI and advisory review
+
+CI validates locked dependencies, formatting, lint, strict types, real disposable
+crypto/lifecycle tests, authored-history credential policy, separate-origin
+browser boundaries and the static build. PR titles use scoped Conventional
+Commits. Bun audit rejects high-severity advisories without inherited ignores;
+OSV scans PRs, main and the weekly dependency schedule. Jobs have time limits,
+read-only checkout tokens and pinned Actions. No browser traces or payload
+artifacts are uploaded. This repository has no application smoke, telemetry,
+preview deployment or release workflow.
+
+Sudden review uses a separately controlled, credential-isolated reviewer.
+Activation requires maintainer configuration and verified live delivery. Public
+CI must not hold account credentials, review App keys or auth-refresh jobs.
+After activation, eligible open, non-draft, same-repository PRs targeting `main`
+receive advisory reviews; dependency-bot and `DO NOT MERGE` PRs are excluded.
+Maintainers can request reruns with exact `/agent review` or `/agent simplify`
+comments. Delivery is polled and may be delayed. Reviews do not approve merges,
+device feasibility or security sign-off, and the former `agent-review-handoff`
+context must not be required. Human review remains necessary.
 
 ## Acceptance evidence
 

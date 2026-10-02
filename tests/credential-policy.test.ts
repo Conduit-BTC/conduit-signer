@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import ts from "typescript"
 
 const staticCredentialRules = [
@@ -48,6 +52,63 @@ const staticCredentialRules = [
 ] as const
 
 type Finding = { file: string; line: number; rule: string }
+
+function git(cwd: string, args: string[]): string {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  if (result.status !== 0)
+    throw new Error("Credential history inspection failed")
+  return result.stdout
+}
+
+function scanHistory(cwd: string, head: string, base?: string): Finding[] {
+  const resolved = git(cwd, [
+    "rev-parse",
+    "--verify",
+    `${head}^{commit}`,
+  ]).trim()
+  if (!/^[a-f0-9]{40}$/.test(resolved))
+    throw new Error("Invalid credential history head")
+  let range = resolved
+  if (base && !/^0+$/.test(base)) {
+    const resolvedBase = git(cwd, [
+      "rev-parse",
+      "--verify",
+      `${base}^{commit}`,
+    ]).trim()
+    if (!/^[a-f0-9]{40}$/.test(resolvedBase))
+      throw new Error("Invalid credential history base")
+    range = `${resolvedBase}..${resolved}`
+  }
+  const commits = git(cwd, ["rev-list", "--reverse", range])
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+  if (commits.length > 1000)
+    throw new Error("Credential history budget exceeded")
+  return commits.flatMap((commit) => {
+    const files = git(cwd, ["ls-tree", "-r", "-z", "--name-only", commit])
+      .split("\0")
+      .filter(Boolean)
+    if (files.length > 1000)
+      throw new Error("Credential snapshot budget exceeded")
+    const findings = findStatic(
+      "commit message",
+      git(cwd, ["show", "-s", "--format=%B", commit]),
+    )
+    for (const file of files) {
+      const source = git(cwd, ["show", `${commit}:${file}`])
+      if (source.includes("\0")) continue
+      findings.push(...findStatic(file, source))
+      if (file.endsWith(".ts") && !encodingAllowed(file, source))
+        findings.push({ file, line: 1, rule: "unapproved secret encoding" })
+    }
+    return findings
+  })
+}
 function findStatic(file: string, source: string): Finding[] {
   return staticCredentialRules.flatMap(({ rule, pattern }) =>
     Array.from(source.matchAll(pattern), (match) => ({
@@ -178,6 +239,41 @@ function encodingAllowed(file: string, source: string): boolean {
 }
 
 describe("disposable fixture policy", () => {
+  test("authored history cannot hide a credential by deleting it before the final head", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "signer-history-"))
+    try {
+      git(cwd, ["init", "--quiet"])
+      git(cwd, ["config", "user.name", "Fixture"])
+      git(cwd, ["config", "user.email", "fixture@invalid.example"])
+      writeFileSync(
+        join(cwd, "hidden.txt"),
+        ["nsec", "1", "prohibitedmarker"].join(""),
+      )
+      git(cwd, ["add", "hidden.txt"])
+      git(cwd, ["commit", "--quiet", "-m", "test: synthetic policy violation"])
+      git(cwd, ["rm", "--quiet", "hidden.txt"])
+      git(cwd, ["commit", "--quiet", "-m", "test: remove synthetic fixture"])
+      const findings = scanHistory(cwd, "HEAD")
+      expect(
+        findings.some((finding) => finding.rule === "encoded secret key"),
+      ).toBe(true)
+      expect(scanHistory(cwd, "HEAD", "HEAD")).toEqual([])
+      expect(() => scanHistory(cwd, "HEAD", "missing-base")).toThrow(
+        "Credential history inspection failed",
+      )
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+  test("authored revisions contain no fixed credentials or unapproved encoding", () => {
+    expect(
+      scanHistory(
+        process.cwd(),
+        process.env.CREDENTIAL_HEAD_SHA || "HEAD",
+        process.env.CREDENTIAL_BASE_SHA,
+      ),
+    ).toEqual([])
+  })
   test("encoding exception requires a runtime source, bounded path and signer input sink", () => {
     const make = (
       source = "generateSecretKey()",

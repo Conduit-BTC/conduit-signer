@@ -47,3 +47,13 @@ Run `bun test`, typecheck, lint, formatting, static build and the relevant
 Playwright checks. Preserve failing device/emulator evidence honestly. No retries
 or assertion weakening to manufacture a pass. Use conventional commits and the
 PR template; keep private tracker context out of public history.
+
+Required browser checks use actual server outages. The separate offline-emulation
+diagnostic preserves the known WebKit failure and must remain an honest nonzero
+result until resolved. Neither is physical iPhone evidence. See README.md.
+
+Sudden is advisory and runs behind an isolated reviewer boundary. Never add
+account credentials, App private keys or auth-refresh workflows to this public
+repository. Candidate code must not run with reviewer credentials. Report missing
+reviews to a maintainer; do not name private runner repositories or secret
+locations in public history. Require human security review for this signer.

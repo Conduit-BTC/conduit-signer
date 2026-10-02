@@ -191,114 +191,127 @@ for (const [name, port] of [
   })
 }
 
-for (const port of [7030, 7031]) {
-  test(`offline emulation reload on ${port} (retains WebKit reproduction)`, async ({
+for (const [name, port] of [
+  ["Market", 7060],
+  ["Merchant", 7061],
+] as const) {
+  test(`${name}: actual server outage restores signer and offline authority`, async ({
     page,
     context,
   }) => {
-    await page.goto(`http://localhost:${port}`)
-    await page.evaluate(async () => {
-      await navigator.serviceWorker.ready
-    })
-    await page
-      .frames()
-      .find((f) => f.url() === "http://localhost:7032/")!
-      .evaluate(async () => {
-        await navigator.serviceWorker.ready
-      })
-    await page.reload()
-    await expect(page.frameLocator("iframe").locator("#state")).toContainText(
-      "No stored record",
-    )
-    expect(
-      await page.evaluate(() => !!navigator.serviceWorker.controller),
-    ).toBe(true)
-    await context.setOffline(true)
-    // Keep this assertion: a known emulator failure is not a device pass.
-    // https://github.com/microsoft/playwright/issues/42775
-    await page.reload()
-    await expect(page.frameLocator("iframe").locator("#state")).toContainText(
-      "No stored record",
-    )
-  })
-}
-
-test("server outage reload restores signer without offline emulation", async ({
-  page,
-}) => {
-  const output = await mkdtemp(join(tmpdir(), "conduit-signer-proof-"))
-  const child = spawn(
-    "bun",
-    [fileURLToPath(new URL("./server.ts", import.meta.url))],
-    {
-      stdio: "ignore",
-      env: {
-        PATH: process.env.PATH,
-        PROOF_MARKET_ORIGIN: "http://localhost:7060",
-        PROOF_MARKET_PORT: "7060",
-        PROOF_MERCHANT_ORIGIN: "http://localhost:7061",
-        PROOF_MERCHANT_PORT: "7061",
-        PROOF_SIGNER_ORIGIN: "http://localhost:7062",
-        PROOF_SIGNER_PORT: "7062",
-        PROOF_OUTPUT_DIR: output,
+    const output = await mkdtemp(join(tmpdir(), "conduit-signer-proof-"))
+    const child = spawn(
+      "bun",
+      [fileURLToPath(new URL("./server.ts", import.meta.url))],
+      {
+        stdio: "ignore",
+        env: {
+          PATH: process.env.PATH,
+          PROOF_MARKET_ORIGIN: "http://localhost:7060",
+          PROOF_MARKET_PORT: "7060",
+          PROOF_MERCHANT_ORIGIN: "http://localhost:7061",
+          PROOF_MERCHANT_PORT: "7061",
+          PROOF_SIGNER_ORIGIN: "http://localhost:7062",
+          PROOF_SIGNER_PORT: "7062",
+          PROOF_OUTPUT_DIR: output,
+        },
       },
-    },
-  )
-  try {
-    await expect
-      .poll(async () => {
-        try {
-          return (await fetch("http://localhost:7060")).ok
-        } catch {
-          return false
-        }
-      })
-      .toBe(true)
-    await page.goto("http://localhost:7060")
-    const frame = page.frameLocator("iframe")
-    await frame
-      .getByRole("button", { name: "Prepare disposable import" })
-      .click()
-    await frame.getByRole("checkbox").check()
-    await frame.getByRole("button", { name: "Import test key" }).click()
-    await expect(frame.locator("#state")).toContainText(
-      "Stored record available",
     )
-    await page.evaluate(async () => {
-      await navigator.serviceWorker.ready
-    })
-    await page
-      .frames()
-      .find((f) => f.url() === "http://localhost:7062/")!
-      .evaluate(async () => {
+    try {
+      await expect
+        .poll(async () => {
+          try {
+            return (await fetch("http://localhost:7060")).ok
+          } catch {
+            return false
+          }
+        })
+        .toBe(true)
+      await page.goto(`http://localhost:${port}`)
+      const frame = page.frameLocator("iframe")
+      await frame
+        .getByRole("button", { name: "Prepare disposable import" })
+        .click()
+      await frame.getByRole("checkbox").check()
+      await frame.getByRole("button", { name: "Import test key" }).click()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.evaluate(async () => {
         await navigator.serviceWorker.ready
       })
-    await page.reload()
-    await expect(frame.locator("#state")).toContainText(
-      "Stored record available",
-    )
-    const stopped = once(child, "exit")
-    child.kill("SIGTERM")
-    await stopped
-    await page.reload()
-    await expect(frame.locator("#state")).toContainText(
-      "Stored record available",
-    )
-    await page.getByRole("button", { name: "Check status" }).click()
-    await expect(page.locator("#result")).toContainText("Connected")
-    await page.getByRole("button", { name: "Verify signing" }).click()
-    await expect(page.locator("#result")).toContainText("PASS: exact template")
-    await page.getByRole("button", { name: "Log out signer" }).click()
-    await expect(page.locator("#result")).toContainText("Logged out")
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) {
+      await page
+        .frames()
+        .find((f) => f.url() === "http://localhost:7062/")!
+        .evaluate(async () => {
+          await navigator.serviceWorker.ready
+        })
+      await page.reload()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
       const stopped = once(child, "exit")
       child.kill("SIGTERM")
       await stopped
+      await page.reload()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.getByRole("button", { name: "Check status" }).click()
+      await expect(page.locator("#result")).toContainText("Connected")
+      await page.getByRole("button", { name: "Verify signing" }).click()
+      await expect(page.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await page.getByRole("button", { name: "Verify NIP-44" }).click()
+      await expect(page.locator("#result")).toContainText("PASS: NIP-44")
+      await page.getByRole("button", { name: "Replace signer frame" }).click()
+      await expect(frame.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await page.getByRole("button", { name: "Check status" }).click()
+      await expect(page.locator("#result")).toContainText("Connected")
+      await page.close()
+      const relaunched = await context.newPage()
+      await relaunched.goto(`http://localhost:${port}`)
+      const restored = relaunched.frameLocator("iframe")
+      await expect(restored.locator("#state")).toContainText(
+        "Stored record available",
+      )
+      await relaunched.getByRole("button", { name: "Check status" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Connected")
+      await relaunched.getByRole("button", { name: "Verify signing" }).click()
+      await expect(relaunched.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await relaunched.getByRole("button", { name: "Verify NIP-44" }).click()
+      await expect(relaunched.locator("#result")).toContainText("PASS: NIP-44")
+      await relaunched.getByRole("button", { name: "Log out signer" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Logged out")
+      await relaunched.reload()
+      await expect(restored.locator("#state")).toContainText("No stored record")
+      await restored
+        .getByRole("button", { name: "Prepare disposable import" })
+        .click()
+      await restored.getByRole("checkbox").check()
+      await restored.getByRole("button", { name: "Import test key" }).click()
+      await relaunched.getByRole("button", { name: "Check status" }).click()
+      await relaunched.getByRole("button", { name: "Verify signing" }).click()
+      await expect(relaunched.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+      await relaunched.getByRole("button", { name: "Log out signer" }).click()
+      await expect(relaunched.locator("#result")).toContainText("Logged out")
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const stopped = once(child, "exit")
+        child.kill("SIGTERM")
+        await stopped
+      }
+      await rm(output, { recursive: true, force: true })
     }
-    await rm(output, { recursive: true, force: true })
-  }
-})
+  })
+}
 test("same storage partition logout revokes the other view", async ({
   context,
 }) => {

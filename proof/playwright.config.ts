@@ -1,7 +1,10 @@
 import { defineConfig } from "@playwright/test"
 export default defineConfig({
   testDir: ".",
-  testMatch: "proof.playwright.ts",
+  testMatch:
+    process.env.PROOF_BROWSER_DIAGNOSTIC === "offline-emulation"
+      ? "offline-emulation.playwright.ts"
+      : "proof.playwright.ts",
   fullyParallel: false,
   workers: 1,
   retries: 0,
