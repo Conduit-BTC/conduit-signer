@@ -1,0 +1,34 @@
+{
+  "name": "conduit-signer",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3.12"
+  },
+  "scripts": {
+    "dev": "bun proof/server.ts",
+    "build": "bun proof/server.ts --build",
+    "test": "bun test tests",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint proof tests",
+    "format:check": "prettier --check .",
+    "test:browser": "playwright test --config proof/playwright.config.ts",
+    "test:browser:diagnostic": "PROOF_BROWSER_DIAGNOSTIC=offline-emulation playwright test --config proof/playwright.config.ts"
+  },
+  "dependencies": {
+    "nostr-tools": "2.25.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.12",
+    "@types/node": "26.2.0",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "eslint": "10.11.0",
+    "fake-indexeddb": "6.2.5",
+    "prettier": "3.9.9",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.1"
+  }
+}
