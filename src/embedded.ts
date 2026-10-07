@@ -96,11 +96,13 @@ export class EmbeddedSigner {
       childList: true,
       subtree: true,
     })
-    const aborted = () => this.invalidate()
+    const generation = this.connecting ? this.generation : ++this.generation
+    const aborted = () => {
+      if (generation === this.generation) this.invalidate()
+    }
     signal?.addEventListener("abort", aborted, { once: true })
     try {
       if (this.connecting) return await this.connecting
-      const generation = this.generation
       const pending = this.client
         .request({ method: "status" })
         .then((value) => {
@@ -132,12 +134,17 @@ export class EmbeddedSigner {
     if (this.closed || !this.frame.isConnected || !this.loaded)
       throw new SignerError("disconnected")
     if (operation.method === "status") return this.connect(signal)
+    // Logout supersedes pending crypto before the client rejects that work.
+    const generation =
+      operation.method === "logout" ? ++this.generation : this.generation
     try {
       const result = await this.client.request(operation, signal)
+      if (generation !== this.generation)
+        throw new SignerError("authority_changed")
       if (operation.method === "logout") this.invalidate()
       return result
     } catch (error) {
-      this.invalidate()
+      if (generation === this.generation) this.invalidate()
       throw error
     }
   }

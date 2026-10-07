@@ -408,6 +408,134 @@ test("same partition account replacement automatically revokes and reconnects bo
     await expect(p.locator("#result")).toContainText("Disconnected")
 })
 
+for (const action of ["logout", "account replacement"] as const) {
+  test(`${action} survives rejection of a pending real signature`, async ({
+    page,
+  }) => {
+    await page.addInitScript((action) => {
+      const root = window as Window & {
+        harness?: EmbeddedSigner
+        signatureArmed?: boolean
+        signatureObserved?: boolean
+        logoutResult?: Promise<string>
+      }
+      window.addEventListener("message", (event) => {
+        if (
+          !root.signatureArmed ||
+          event.origin !== "http://localhost:7032" ||
+          event.source !== document.querySelector("iframe")?.contentWindow ||
+          !event.data?.value?.sig
+        )
+          return
+        root.signatureArmed = false
+        root.signatureObserved = true
+        event.stopImmediatePropagation()
+        if (action === "logout")
+          root.logoutResult = root.harness!.request({ method: "logout" }).then(
+            () => "success",
+            (error) => error.code,
+          )
+      })
+    }, action)
+    await page.goto("http://localhost:7030")
+    const frame = page.frameLocator("iframe")
+    await frame
+      .getByRole("button", { name: "Prepare disposable import" })
+      .click()
+    await frame.getByRole("button", { name: "Import NSEC" }).click()
+    await expect(page.locator("#result")).toContainText("Connected")
+    await page.evaluate(() => {
+      const root = window as Window & {
+        harness?: EmbeddedSigner
+        signatureArmed?: boolean
+        signatureResult?: Promise<string>
+        previousRevision?: string
+      }
+      const endpoint = root.harness!
+      root.signatureArmed = true
+      root.previousRevision = endpoint.binding!.revision
+      root.signatureResult = endpoint
+        .request({
+          method: "signEvent",
+          event: {
+            kind: 1,
+            pubkey: endpoint.binding!.pubkey,
+            created_at: 1,
+            tags: [],
+            content: "Never published",
+          },
+        })
+        .then(
+          () => "unexpected_success",
+          (error) => error.code,
+        )
+    })
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as Window & { signatureObserved?: boolean })
+              .signatureObserved === true,
+        ),
+      )
+      .toBe(true)
+    if (action === "logout") {
+      const outcome = await page.evaluate(async () => {
+        const root = window as Window & {
+          harness?: EmbeddedSigner
+          signatureResult?: Promise<string>
+          logoutResult?: Promise<string>
+        }
+        return {
+          signature: await root.signatureResult,
+          logout: await root.logoutResult,
+          disconnected: root.harness!.binding === null,
+        }
+      })
+      expect(outcome).toEqual({
+        signature: "authority_changed",
+        logout: "success",
+        disconnected: true,
+      })
+      await expect(frame.locator("#state")).toContainText("No stored record")
+      await page.getByRole("button", { name: "Replace signer frame" }).click()
+      await expect(page.locator("#result")).toContainText("Disconnected")
+      await expect(frame.locator("#state")).toContainText("No stored record")
+    } else {
+      await frame
+        .getByRole("button", { name: "Prepare disposable import" })
+        .click()
+      await frame.getByRole("button", { name: "Import NSEC" }).click()
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const root = window as Window & {
+              harness?: EmbeddedSigner
+              previousRevision?: string
+            }
+            return (
+              !!root.harness!.binding &&
+              root.harness!.binding.revision !== root.previousRevision
+            )
+          }),
+        )
+        .toBe(true)
+      expect(
+        await page.evaluate(
+          async () =>
+            (window as Window & { signatureResult?: Promise<string> })
+              .signatureResult,
+        ),
+      ).toBe("authority_changed")
+      await expect(page.locator("#result")).toContainText("Connected")
+      await page.getByRole("button", { name: "Verify signing" }).click()
+      await expect(page.locator("#result")).toContainText(
+        "PASS: exact template",
+      )
+    }
+  })
+}
+
 test("failed embedded logout stays unavailable after storage recovers until cleanup", async ({
   page,
 }) => {
