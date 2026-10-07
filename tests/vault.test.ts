@@ -209,7 +209,8 @@ describe("disposable separate-origin signer proof", () => {
     expect((await s.vault.handle(s.request({ method: "logout" }))).error).toBe(
       "authority_changed",
     )
-    expect(await s.vault.binding()).not.toBe(null)
+    await expect(s.vault.binding()).rejects.toThrow("unavailable")
+    expect(await other.binding()).not.toBe(null)
     s.secret.fill(0)
   })
   test("wrong frame, account and revision cannot use the key", async () => {
@@ -296,6 +297,34 @@ describe("disposable separate-origin signer proof", () => {
     failWrites = false
     await vault.logout()
     expect(await s.vault.binding()).toBe(null)
+    s.secret.fill(0)
+  })
+  test("bound logout revokes before its initial read and permits conditional cleanup retry", async () => {
+    const s = await setup()
+    let blocked = true
+    const factory = {
+      open: (...args: Parameters<IDBFactory["open"]>) => {
+        if (blocked) throw new DOMException("blocked", "SecurityError")
+        return s.factory.open(...args)
+      },
+    } as unknown as IDBFactory
+    const vault = new SignerVault(factory)
+    const request = { ...s.request({ method: "logout" }), frame: vault.frame }
+    expect((await vault.handle(request)).error).toBe("unavailable")
+    blocked = false
+    await expect(vault.binding()).rejects.toThrow("unavailable")
+    expect(
+      (
+        await vault.handle({
+          ...s.request({ method: "signEvent", event: s.event }),
+          frame: vault.frame,
+        })
+      ).error,
+    ).toBe("unavailable")
+    expect(await s.vault.binding()).not.toBe(null)
+    expect((await vault.handle(request)).ok).toBe(true)
+    expect(await s.vault.binding()).toBe(null)
+    expect(await vault.binding()).toBe(null)
     s.secret.fill(0)
   })
   test("corrupt records are unavailable and can be removed; stalled storage is bounded", async () => {

@@ -33,8 +33,12 @@ permission to use a stale app principal.
    title, `referrerPolicy="no-referrer"`, and sandbox
    `allow-scripts allow-same-origin allow-forms`. Retain that iframe for the lease.
 2. Construct `new EmbeddedSigner(frame, exactSignerOrigin, onChange, timeoutMs)`
-   before attaching it. Load automatically sends status. `connect()` also binds
-   an already-loaded frame and coalesces simultaneous handshakes.
+   before attaching it. Load automatically sends status. `connect(signal?)` also
+   binds an already-loaded frame and coalesces simultaneous handshakes. Cancelling
+   any waiter cancels the shared attempt and rejects all waiters; late status
+   replies cannot restore it. A pre-aborted signal starts no handshake. After a
+   failed or cancelled handshake, the auth owner must start a fresh connection
+   attempt after cleanup; it cannot reuse the old lease or channel.
 3. `onChange(null)` synchronously revokes app authority and pending operations.
    A later non-null `Status` is a provider observation, never permission to reuse
    a previously revoked app lease. Install a new candidate through the existing

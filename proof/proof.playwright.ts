@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import type { EmbeddedSigner } from "../src/embedded"
 
 test("exact parent origin and source are required; parent ignores forged changes", async ({
   page,
@@ -407,76 +408,205 @@ test("same partition account replacement automatically revokes and reconnects bo
     await expect(p.locator("#result")).toContainText("Disconnected")
 })
 
-test("detaching an endpoint cancels a pending real signature and discards its response", async ({
+test("failed embedded logout stays unavailable after storage recovers until cleanup", async ({
   page,
 }) => {
-  // Register before the endpoint listener: Chromium's Window message delivery
-  // preserves registration order even for a later capture listener.
+  await page.goto("http://localhost:7030")
+  const frame = page.frameLocator("iframe")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(page.locator("#result")).toContainText("Connected")
+  const signer = page
+    .frames()
+    .find((f) => f.url() === "http://localhost:7032/")!
+  await signer.evaluate(() => {
+    const root = window as Window & { storageBlocked?: boolean }
+    const original = indexedDB.open.bind(indexedDB)
+    root.storageBlocked = true
+    indexedDB.open = (...args) => {
+      if (root.storageBlocked)
+        throw new DOMException("blocked", "SecurityError")
+      return original(...args)
+    }
+  })
+  await page.getByRole("button", { name: "Log out signer" }).click()
+  await expect(page.locator("#result")).toContainText("unavailable")
+  await signer.evaluate(() => {
+    ;(window as Window & { storageBlocked?: boolean }).storageBlocked = false
+  })
+  await page.getByRole("button", { name: "Check status" }).click()
+  await expect(page.locator("#result")).toContainText("unavailable")
+  await page.getByRole("button", { name: "Verify signing" }).click()
+  await expect(page.locator("#result")).toContainText("disconnected")
+  await frame.getByRole("button", { name: "Log out and remove key" }).click()
+  await expect(frame.locator("#state")).toContainText("No stored record")
+  // Failed status invalidates the channel. Retry discovery after cleanup;
+  // credential deletion alone cannot revive that cancelled connection attempt.
+  await page.getByRole("button", { name: "Check status" }).click()
+  await expect(page.locator("#result")).toContainText("Disconnected")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(page.locator("#result")).toContainText("Connected")
+  await page.getByRole("button", { name: "Verify signing" }).click()
+  await expect(page.locator("#result")).toContainText("PASS: exact template")
+})
+
+test("status cancellation rejects aborted and coalesced handshakes and ignores late restoration", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     const root = window as Window & {
-      removalArmed?: boolean
-      signatureObserved?: boolean
+      watchStatus?: boolean
+      lateStatusObserved?: boolean
     }
-    window.addEventListener(
-      "message",
-      (event) => {
-        const frame = document.querySelector("iframe")
-        if (
-          !root.removalArmed ||
-          !frame ||
-          event.origin !== "http://localhost:7032" ||
-          event.source !== frame.contentWindow ||
-          !event.data?.value?.sig
-        )
-          return
-        root.signatureObserved = true
-        root.removalArmed = false
-        event.stopImmediatePropagation()
-        frame.remove()
-      },
-      true,
-    )
+    window.addEventListener("message", (event) => {
+      if (
+        root.watchStatus &&
+        event.origin === "http://localhost:7032" &&
+        event.source === document.querySelector("iframe")?.contentWindow &&
+        event.data?.ok === true &&
+        !("value" in event.data)
+      )
+        root.lateStatusObserved = true
+    })
   })
   await page.goto("http://localhost:7030")
   const frame = page.frameLocator("iframe")
   await frame.getByRole("button", { name: "Prepare disposable import" }).click()
   await frame.getByRole("button", { name: "Import NSEC" }).click()
   await expect(page.locator("#result")).toContainText("Connected")
-  const outcome = await page.evaluate(async () => {
+  const codes = await page.evaluate(async () => {
     const root = window as Window & {
-      removalArmed?: boolean
-      signatureObserved?: boolean
-      harness?: {
-        binding: { pubkey: string } | null
-        request: (op: unknown) => Promise<unknown>
-      }
+      harness?: EmbeddedSigner
+      watchStatus?: boolean
     }
     const endpoint = root.harness!
-    root.removalArmed = true
-    const code = await endpoint
-      .request({
-        method: "signEvent",
-        event: {
-          kind: 1,
-          pubkey: endpoint.binding!.pubkey,
-          created_at: 1,
-          tags: [],
-          content: "Never published",
-        },
-      })
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = await endpoint
+      .request({ method: "status" }, controller.signal)
       .then(
         () => "unexpected_success",
-        (error) => error.code,
+        (e) => e.code,
       )
-    return {
-      observedSignature: root.signatureObserved === true,
-      code,
-      disconnected: endpoint.binding === null,
-    }
+    root.watchStatus = true
+    const coalescedController = new AbortController()
+    const original = endpoint.connect().then(
+      () => "unexpected_success",
+      (e) => e.code,
+    )
+    const coalesced = endpoint
+      .request({ method: "status" }, coalescedController.signal)
+      .then(
+        () => "unexpected_success",
+        (e) => e.code,
+      )
+    coalescedController.abort()
+    return [aborted, await original, await coalesced]
   })
-  expect(outcome).toEqual({
-    observedSignature: true,
-    code: "authority_changed",
-    disconnected: true,
-  })
+  expect(codes).toEqual([
+    "authority_changed",
+    "authority_changed",
+    "authority_changed",
+  ])
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { lateStatusObserved?: boolean })
+            .lateStatusObserved === true,
+      ),
+    )
+    .toBe(true)
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { harness?: EmbeddedSigner }).harness!.binding ===
+        null,
+    ),
+  ).toBe(true)
+  await expect(page.locator("#result")).toContainText("Disconnected")
+  await page.getByRole("button", { name: "Check status" }).click()
+  await expect(page.locator("#result")).toContainText("Connected")
+  await page.getByRole("button", { name: "Verify signing" }).click()
+  await expect(page.locator("#result")).toContainText("PASS: exact template")
 })
+
+for (const removal of ["frame", "containing view"] as const) {
+  test(`detaching the ${removal} cancels a pending real signature and discards its response`, async ({
+    page,
+  }) => {
+    // Register before the endpoint listener: Chromium's Window message delivery
+    // preserves registration order even for a later capture listener.
+    await page.addInitScript((removal) => {
+      const root = window as Window & {
+        removalArmed?: boolean
+        signatureObserved?: boolean
+      }
+      window.addEventListener(
+        "message",
+        (event) => {
+          const frame = document.querySelector("iframe")
+          if (
+            !root.removalArmed ||
+            !frame ||
+            event.origin !== "http://localhost:7032" ||
+            event.source !== frame.contentWindow ||
+            !event.data?.value?.sig
+          )
+            return
+          root.signatureObserved = true
+          root.removalArmed = false
+          event.stopImmediatePropagation()
+          if (removal === "frame") frame.remove()
+          else document.querySelector("#mount")!.remove()
+        },
+        true,
+      )
+    }, removal)
+    await page.goto("http://localhost:7030")
+    const frame = page.frameLocator("iframe")
+    await frame
+      .getByRole("button", { name: "Prepare disposable import" })
+      .click()
+    await frame.getByRole("button", { name: "Import NSEC" }).click()
+    await expect(page.locator("#result")).toContainText("Connected")
+    const outcome = await page.evaluate(async () => {
+      const root = window as Window & {
+        removalArmed?: boolean
+        signatureObserved?: boolean
+        harness?: {
+          binding: { pubkey: string } | null
+          request: (op: unknown) => Promise<unknown>
+        }
+      }
+      const endpoint = root.harness!
+      root.removalArmed = true
+      const code = await endpoint
+        .request({
+          method: "signEvent",
+          event: {
+            kind: 1,
+            pubkey: endpoint.binding!.pubkey,
+            created_at: 1,
+            tags: [],
+            content: "Never published",
+          },
+        })
+        .then(
+          () => "unexpected_success",
+          (error) => error.code,
+        )
+      return {
+        observedSignature: root.signatureObserved === true,
+        code,
+        disconnected: endpoint.binding === null,
+      }
+    })
+    expect(outcome).toEqual({
+      observedSignature: true,
+      code: "authority_changed",
+      disconnected: true,
+    })
+  })
+}

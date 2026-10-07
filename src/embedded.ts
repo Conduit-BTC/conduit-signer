@@ -65,8 +65,6 @@ export class EmbeddedSigner {
   }
   private reload = () => {
     this.loaded = true
-    if (this.frame.parentNode)
-      this.observer.observe(this.frame.parentNode, { childList: true })
     this.invalidate()
     void this.connect().catch(() => {}) // connect reports the typed failure.
   }
@@ -86,44 +84,54 @@ export class EmbeddedSigner {
   get binding() {
     return this.client.binding
   }
-  async connect(): Promise<Status> {
+  async connect(signal?: AbortSignal): Promise<Status> {
+    if (signal?.aborted) throw new SignerError("authority_changed")
     if (this.closed || !this.frame.isConnected)
       throw new SignerError("disconnected")
     if (new URL(this.frame.src).origin !== this.origin)
       throw new SignerError("unavailable")
     this.loaded = true
-    if (this.frame.parentNode)
-      this.observer.observe(this.frame.parentNode, { childList: true })
-    if (this.connecting) return this.connecting
-    const generation = this.generation
-    const pending = this.client
-      .request({ method: "status" })
-      .then((value) => {
-        if (this.closed || generation !== this.generation)
-          throw new SignerError("authority_changed")
-        const status = value as Status
-        this.changed(status)
-        return status
-      })
-      .catch((error: unknown) => {
-        const failure =
-          error instanceof SignerError
-            ? error
-            : new SignerError("invalid_response")
-        if (!this.closed && generation === this.generation)
-          this.changed(null, failure)
-        throw failure
-      })
-      .finally(() => {
-        if (this.connecting === pending) this.connecting = null
-      })
-    this.connecting = pending
-    return pending
+    // Containing views can be removed without mutating the iframe's parent.
+    this.observer.observe(this.frame.ownerDocument, {
+      childList: true,
+      subtree: true,
+    })
+    const aborted = () => this.invalidate()
+    signal?.addEventListener("abort", aborted, { once: true })
+    try {
+      if (this.connecting) return await this.connecting
+      const generation = this.generation
+      const pending = this.client
+        .request({ method: "status" })
+        .then((value) => {
+          if (this.closed || generation !== this.generation)
+            throw new SignerError("authority_changed")
+          const status = value as Status
+          this.changed(status)
+          return status
+        })
+        .catch((error: unknown) => {
+          const failure =
+            error instanceof SignerError
+              ? error
+              : new SignerError("invalid_response")
+          if (!this.closed && generation === this.generation)
+            this.changed(null, failure)
+          throw failure
+        })
+        .finally(() => {
+          if (this.connecting === pending) this.connecting = null
+        })
+      this.connecting = pending
+      return await pending
+    } finally {
+      signal?.removeEventListener("abort", aborted)
+    }
   }
   async request(operation: Operation, signal?: AbortSignal): Promise<unknown> {
     if (this.closed || !this.frame.isConnected || !this.loaded)
       throw new SignerError("disconnected")
-    if (operation.method === "status") return this.connect()
+    if (operation.method === "status") return this.connect(signal)
     try {
       const result = await this.client.request(operation, signal)
       if (operation.method === "logout") this.invalidate()

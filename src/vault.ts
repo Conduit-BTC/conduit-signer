@@ -175,12 +175,16 @@ export class SignerVault {
       frame: this.frame,
     } as const
     let record: Stored | null = null
-    const operation = this.generation
     try {
       if (req.method === "status")
         return { ...base, ok: true, binding: await this.binding() }
       if (req.frame !== this.frame) throw new SignerError("authority_changed")
-      if (this.revoked) throw new SignerError("unavailable")
+      if (req.method === "logout") {
+        // Revoke this view even if reading the record for cleanup fails.
+        this.invalidate()
+        this.revoked = true
+      } else if (this.revoked) throw new SignerError("unavailable")
+      const operation = this.generation
       record = await this.read()
       if (operation !== this.generation)
         throw new SignerError("authority_changed")
@@ -194,8 +198,6 @@ export class SignerVault {
         throw new SignerError("authority_changed")
       let value: unknown
       if (req.method === "logout") {
-        this.invalidate()
-        this.revoked = true
         // Conditional delete avoids a stale view deleting a later import.
         const db = await this.db()
         try {
