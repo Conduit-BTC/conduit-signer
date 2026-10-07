@@ -124,8 +124,8 @@ for (const [name, port] of [
     await signer
       .getByRole("button", { name: "Prepare disposable import" })
       .click()
-    await signer.getByRole("checkbox").check()
-    await signer.getByRole("button", { name: "Import test key" }).click()
+
+    await signer.getByRole("button", { name: "Import NSEC" }).click()
     await expect(signer.locator("#state")).toContainText(
       "Stored record available",
     )
@@ -167,8 +167,8 @@ for (const [name, port] of [
     await signer
       .getByRole("button", { name: "Prepare disposable import" })
       .click()
-    await signer.getByRole("checkbox").check()
-    await signer.getByRole("button", { name: "Import test key" }).click()
+
+    await signer.getByRole("button", { name: "Import NSEC" }).click()
     await expect(signer.locator("#state")).toContainText(
       "Stored record available",
     )
@@ -187,7 +187,7 @@ for (const [name, port] of [
           !r.query,
       ),
     ).toBe(true)
-    await signer.getByRole("button", { name: "Forget local test key" }).click()
+    await signer.getByRole("button", { name: "Log out and remove key" }).click()
   })
 }
 
@@ -202,7 +202,7 @@ for (const [name, port] of [
     const output = await mkdtemp(join(tmpdir(), "conduit-signer-proof-"))
     const child = spawn(
       "bun",
-      [fileURLToPath(new URL("./server.ts", import.meta.url))],
+      [fileURLToPath(new URL("./server.ts", import.meta.url)), "--harness"],
       {
         stdio: "ignore",
         env: {
@@ -232,8 +232,8 @@ for (const [name, port] of [
       await frame
         .getByRole("button", { name: "Prepare disposable import" })
         .click()
-      await frame.getByRole("checkbox").check()
-      await frame.getByRole("button", { name: "Import test key" }).click()
+
+      await frame.getByRole("button", { name: "Import NSEC" }).click()
       await expect(frame.locator("#state")).toContainText(
         "Stored record available",
       )
@@ -293,8 +293,8 @@ for (const [name, port] of [
       await restored
         .getByRole("button", { name: "Prepare disposable import" })
         .click()
-      await restored.getByRole("checkbox").check()
-      await restored.getByRole("button", { name: "Import test key" }).click()
+
+      await restored.getByRole("button", { name: "Import NSEC" }).click()
       await relaunched.getByRole("button", { name: "Check status" }).click()
       await relaunched.getByRole("button", { name: "Verify signing" }).click()
       await expect(relaunched.locator("#result")).toContainText(
@@ -321,8 +321,8 @@ test("same storage partition logout revokes the other view", async ({
   await b.goto("http://localhost:7030")
   const frame = a.frameLocator("iframe")
   await frame.getByRole("button", { name: "Prepare disposable import" }).click()
-  await frame.getByRole("checkbox").check()
-  await frame.getByRole("button", { name: "Import test key" }).click()
+
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
   await expect(frame.locator("#state")).toContainText("Stored record available")
   for (const p of [a, b]) {
     await p.getByRole("button", { name: "Check status" }).click()
@@ -330,7 +330,153 @@ test("same storage partition logout revokes the other view", async ({
   }
   await a.getByRole("button", { name: "Log out signer" }).click()
   await expect(a.locator("#result")).toContainText("Logged out")
-  await expect(b.locator("#result")).toContainText("Signer changed")
+  await expect(b.locator("#result")).toContainText("Disconnected")
   await b.getByRole("button", { name: "Verify signing" }).click()
   await expect(b.locator("#result")).toContainText("disconnected")
+})
+
+test("ordinary input rejects invalid NSEC and storage failures without enabling signing", async ({
+  page,
+}) => {
+  await page.goto("http://localhost:7030")
+  const frame = page.frameLocator("iframe")
+  await frame.locator("#nsec").fill("invalid input")
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(frame.locator("#state")).toContainText("Invalid NSEC")
+  await expect(frame.locator("#nsec")).toHaveValue("")
+  await page.getByRole("button", { name: "Verify signing" }).click()
+  await expect(page.locator("#result")).toContainText("disconnected")
+  await page
+    .frames()
+    .find((f) => f.url() === "http://localhost:7032/")!
+    .evaluate(() => {
+      indexedDB.open = () => {
+        throw new DOMException("blocked", "SecurityError")
+      }
+    })
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(frame.locator("#state")).toContainText("Storage unavailable")
+  await expect(frame.locator("#nsec")).toHaveValue("")
+  await page.getByRole("button", { name: "Check status" }).click()
+  await expect(page.locator("#result")).toContainText("unavailable")
+  await page.reload()
+  await expect(frame.locator("#state")).toContainText("No stored record")
+})
+
+test("same partition account replacement automatically revokes and reconnects both endpoints", async ({
+  context,
+}) => {
+  const a = await context.newPage()
+  const b = await context.newPage()
+  await a.goto("http://localhost:7030")
+  await b.goto("http://localhost:7030")
+  const frame = a.frameLocator("iframe")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  for (const p of [a, b])
+    await expect(p.locator("#result")).toContainText("Connected")
+  // Compare public identity only, and return a boolean rather than record it.
+  await b.evaluate(() => {
+    const root = window as Window & {
+      harness?: { binding: { pubkey: string } | null }
+      previousPublicKey?: string
+    }
+    root.previousPublicKey = root.harness!.binding!.pubkey
+  })
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect
+    .poll(() =>
+      b.evaluate(() => {
+        const root = window as Window & {
+          harness?: { binding: { pubkey: string } | null }
+          previousPublicKey?: string
+        }
+        return (
+          !!root.harness?.binding &&
+          root.harness.binding.pubkey !== root.previousPublicKey
+        )
+      }),
+    )
+    .toBe(true)
+  await b.getByRole("button", { name: "Verify signing" }).click()
+  await expect(b.locator("#result")).toContainText("PASS: exact template")
+  await frame.getByRole("button", { name: "Log out and remove key" }).click()
+  for (const p of [a, b])
+    await expect(p.locator("#result")).toContainText("Disconnected")
+})
+
+test("detaching an endpoint cancels a pending real signature and discards its response", async ({
+  page,
+}) => {
+  // Register before the endpoint listener: Chromium's Window message delivery
+  // preserves registration order even for a later capture listener.
+  await page.addInitScript(() => {
+    const root = window as Window & {
+      removalArmed?: boolean
+      signatureObserved?: boolean
+    }
+    window.addEventListener(
+      "message",
+      (event) => {
+        const frame = document.querySelector("iframe")
+        if (
+          !root.removalArmed ||
+          !frame ||
+          event.origin !== "http://localhost:7032" ||
+          event.source !== frame.contentWindow ||
+          !event.data?.value?.sig
+        )
+          return
+        root.signatureObserved = true
+        root.removalArmed = false
+        event.stopImmediatePropagation()
+        frame.remove()
+      },
+      true,
+    )
+  })
+  await page.goto("http://localhost:7030")
+  const frame = page.frameLocator("iframe")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(page.locator("#result")).toContainText("Connected")
+  const outcome = await page.evaluate(async () => {
+    const root = window as Window & {
+      removalArmed?: boolean
+      signatureObserved?: boolean
+      harness?: {
+        binding: { pubkey: string } | null
+        request: (op: unknown) => Promise<unknown>
+      }
+    }
+    const endpoint = root.harness!
+    root.removalArmed = true
+    const code = await endpoint
+      .request({
+        method: "signEvent",
+        event: {
+          kind: 1,
+          pubkey: endpoint.binding!.pubkey,
+          created_at: 1,
+          tags: [],
+          content: "Never published",
+        },
+      })
+      .then(
+        () => "unexpected_success",
+        (error) => error.code,
+      )
+    return {
+      observedSignature: root.signatureObserved === true,
+      code,
+      disconnected: endpoint.binding === null,
+    }
+  })
+  expect(outcome).toEqual({
+    observedSignature: true,
+    code: "authority_changed",
+    disconnected: true,
+  })
 })

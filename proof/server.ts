@@ -1,11 +1,25 @@
-import { mkdir } from "node:fs/promises"
+import { mkdir, rm } from "node:fs/promises"
 import { resolve } from "node:path"
 import { createHash } from "node:crypto"
 
 const directory = import.meta.dir
+const harness = process.argv.includes("--harness")
+const preview = process.argv.includes("--preview")
+if (preview && (!process.argv.includes("--build") || harness))
+  throw new Error("Preview prepares the supported signer artifact only")
+if (
+  preview &&
+  ["PROOF_MARKET_ORIGIN", "PROOF_MERCHANT_ORIGIN", "PROOF_SIGNER_ORIGIN"].some(
+    (key) => !process.env[key]?.startsWith("https://"),
+  )
+)
+  throw new Error(
+    "Preview requires three explicitly configured exact HTTPS origins",
+  )
 function exactOrigin(value: string): string {
   const u = new URL(value)
   if (
+    value.includes("*") ||
     u.origin !== value ||
     u.username ||
     u.password ||
@@ -38,10 +52,15 @@ const top = (title: string) =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="apple-mobile-web-app-capable" content="yes"><title>${title}</title><link rel="stylesheet" href="/proof.css">`
 const host = (name: string) =>
   `${top(name)}<link rel="manifest" href="/manifest.webmanifest"></head><body data-signer="${escape(signer)}"><h1>${name}</h1><p>Feasibility harness only. No real accounts, payments or relay delivery.</p><p id="mode"></p><p><code id="origins"></code></p><p>Safari and installed apps may use separate storage and require separate imports. This check does not assume sharing.</p><div id="mount"></div><fieldset><legend>Checks</legend><button id="status">Check status</button><button id="sign">Verify signing</button><button id="encrypt">Verify NIP-44</button><button id="reload">Replace signer frame</button><button id="logout">Log out signer</button></fieldset><output id="result" aria-live="polite">Loading</output><script type="module" src="/host.js"></script></body></html>`
-const signerHtml = `${top("Disposable signer proof")}</head><body data-parents="${escape(JSON.stringify([market, merchant]))}"><h1>Disposable signer proof</h1><p>Import happens at <strong id="origin"></strong>. Never use a real account key.</p><p>This prototype stores the test key in this origin's IndexedDB without password protection. It is not a production signer.</p><button id="fixture">Prepare disposable import</button><form id="import"><label for="nsec">Disposable test nsec</label><input id="nsec" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required><label><input id="disposable" type="checkbox" required>I confirm this is a disposable test key.</label><button type="submit">Import test key</button></form><button id="forget">Forget local test key</button><output id="state" aria-live="polite">Checking storage</output><p id="offline"></p><p>Logout removes the active record; it does not erase forensic copies or device backups. Reimport is required after storage loss.</p><script type="module" src="/signer.js"></script></body></html>`
+const signerHtml = `${top("Conduit Signer")}</head><body data-parents="${escape(JSON.stringify([market, merchant]))}"><h1>Conduit Signer</h1><p>Your existing Nostr key is imported and stored at <strong id="origin"></strong>.</p><p>This browser restores your signer automatically. Safari and installed apps may use separate storage and require separate imports.</p>${harness ? '<button id="fixture">Prepare disposable import</button>' : ""}<form id="import"><label for="nsec">Existing NSEC</label><input id="nsec" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="100" required aria-describedby="key-boundary"><p id="key-boundary">Your secret key stays with this signer. The connected app receives your public identity and signing results.</p><button type="submit">Import NSEC</button></form><button id="forget" hidden>Log out and remove key</button><output id="state" aria-live="polite">Checking storage</output><p id="offline"></p><p>Logout removes this browser's stored record and revokes its live sessions. Reimport is required after logout or storage loss. It does not erase forensic copies or device backups.</p><script type="module" src="/signer.js"></script>${harness ? '<script type="module" src="/fixture.js"></script>' : ""}</body></html>`
 
 const bundled = await Bun.build({
-  entrypoints: [resolve(directory, "host.ts"), resolve(directory, "signer.ts")],
+  entrypoints: [
+    resolve(directory, "../src/signer.ts"),
+    ...(harness
+      ? [resolve(directory, "host.ts"), resolve(directory, "fixture.ts")]
+      : []),
+  ],
   target: "browser",
   minify: true,
   sourcemap: "none",
@@ -72,8 +91,12 @@ function worker(paths: string[]) {
   return `const CACHE="signer-proof-${revision}";const PATHS=${JSON.stringify(paths)};self.addEventListener("install",e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(PATHS)).then(()=>self.skipWaiting()))});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith("signer-proof-")&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});self.addEventListener("fetch",e=>{const u=new URL(e.request.url);if(e.request.method!=="GET"||u.origin!==self.location.origin||u.search||!PATHS.includes(u.pathname))return;e.respondWith(fetch(e.request).catch(()=>caches.open(CACHE).then(c=>c.match(e.request)).then(r=>r||Response.error())))});`
 }
 type Surface = "market" | "merchant" | "signer"
-const output = resolve(process.env.PROOF_OUTPUT_DIR ?? "dist")
-for (const surface of ["market", "merchant", "signer"] as Surface[]) {
+const output = resolve(
+  process.env.PROOF_OUTPUT_DIR ?? (harness ? "dist/harness" : "dist"),
+)
+for (const surface of (harness
+  ? ["market", "merchant", "signer"]
+  : ["signer"]) as Surface[]) {
   const isSigner = surface === "signer"
   const script = isSigner ? "signer.js" : "host.js"
   const manifest = JSON.stringify({
@@ -92,10 +115,14 @@ for (const surface of ["market", "merchant", "signer"] as Surface[]) {
           `${surface === "market" ? "Market" : "Merchant"} signer feasibility`,
         ),
     [`/${script}`]: scripts.get(script)!,
+    ...(isSigner && harness
+      ? { "/fixture.js": scripts.get("fixture.js")! }
+      : {}),
     "/proof.css": css,
     "/sw.js": worker([
       "/",
       `/${script}`,
+      ...(isSigner && harness ? ["/fixture.js"] : []),
       "/proof.css",
       ...(isSigner ? [] : ["/manifest.webmanifest", "/icon.svg"]),
     ]),
@@ -114,6 +141,8 @@ for (const surface of ["market", "merchant", "signer"] as Surface[]) {
     "Cache-Control": "no-store",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   }
+  // Replace generated artifacts so a previous harness fixture cannot survive.
+  await rm(resolve(output, surface), { recursive: true, force: true })
   await mkdir(resolve(output, surface), { recursive: true })
   for (const [path, text] of Object.entries(files))
     await Bun.write(
@@ -164,6 +193,6 @@ for (const surface of ["market", "merchant", "signer"] as Surface[]) {
 }
 console.info(
   process.argv.includes("--build")
-    ? "Built three isolated proof surfaces; nothing deployed."
-    : "Disposable signer proof: Market localhost:7030; Merchant localhost:7031; signer localhost:7032. No relay access.",
+    ? "Built isolated signer artifacts; nothing deployed."
+    : "Signer localhost:7032. Parent probes are enabled only with --harness. No relay access.",
 )

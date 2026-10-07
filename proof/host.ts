@@ -1,42 +1,35 @@
-import { ProofClient, ProofError, VERSION } from "./protocol"
+import { SignerError } from "../src/protocol"
+import { EmbeddedSigner } from "../src/embedded"
 
 const origin = document.body.dataset.signer!
 const mount = document.querySelector("#mount")!
 const result = document.querySelector<HTMLOutputElement>("#result")!
 let frame: HTMLIFrameElement
-const client = new ProofClient((request) =>
-  frame.contentWindow!.postMessage(request, origin),
-)
+let client: EmbeddedSigner
 function replaceFrame() {
-  client.reset()
+  client?.close()
   const next = document.createElement("iframe")
-  next.title = "Disposable signer import on a separate origin"
+  next.title = "Conduit Signer on a separate origin"
   next.src = origin + "/"
   next.referrerPolicy = "no-referrer"
   next.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms")
-  next.onload = () => {
-    if (frame === next) {
-      client.reset()
-      result.textContent = "Frame loaded. Check status to bind this session."
-    }
-  }
   frame = next
+  client = new EmbeddedSigner(frame, origin, (status, error) => {
+    result.textContent = error
+      ? `Check failed: ${error.code}.`
+      : status?.binding
+        ? "Connected to stored signer. No key entered in this app."
+        : "Disconnected. Import in the signer frame."
+  })
+  // Test harness access only. No signer secret crosses this boundary.
+  ;(window as Window & { harness?: EmbeddedSigner }).harness = client
   mount.replaceChildren(frame)
 }
-window.addEventListener("message", (event) => {
-  if (event.origin !== origin || event.source !== frame.contentWindow) return
-  if (event.data?.version === VERSION && event.data.changed === true) {
-    client.reset()
-    result.textContent = "Signer changed. Check status to reconnect."
-    return
-  }
-  client.receive(event.data)
-})
 async function run(action: () => Promise<void>) {
   try {
     await action()
   } catch (e) {
-    result.textContent = `Check failed: ${e instanceof ProofError ? e.code : "invalid_response"}.`
+    result.textContent = `Check failed: ${e instanceof SignerError ? e.code : "invalid_response"}.`
   }
 }
 document.querySelector<HTMLButtonElement>("#status")!.onclick = () =>
@@ -48,7 +41,7 @@ document.querySelector<HTMLButtonElement>("#status")!.onclick = () =>
   })
 document.querySelector<HTMLButtonElement>("#sign")!.onclick = () =>
   void run(async () => {
-    if (!client.binding) throw new ProofError("disconnected")
+    if (!client.binding) throw new SignerError("disconnected")
     await client.request({
       method: "signEvent",
       event: {
@@ -64,7 +57,7 @@ document.querySelector<HTMLButtonElement>("#sign")!.onclick = () =>
   })
 document.querySelector<HTMLButtonElement>("#encrypt")!.onclick = () =>
   void run(async () => {
-    if (!client.binding) throw new ProofError("disconnected")
+    if (!client.binding) throw new SignerError("disconnected")
     const peer = client.binding.pubkey
     const text = "Disposable feasibility round trip."
     const ciphertext = (await client.request({
@@ -77,7 +70,7 @@ document.querySelector<HTMLButtonElement>("#encrypt")!.onclick = () =>
       peer,
       text: ciphertext,
     })
-    if (plaintext !== text) throw new ProofError("invalid_response")
+    if (plaintext !== text) throw new SignerError("invalid_response")
     result.textContent = "PASS: NIP-44 v2 encryption and decryption verified."
   })
 document.querySelector<HTMLButtonElement>("#logout")!.onclick = () =>

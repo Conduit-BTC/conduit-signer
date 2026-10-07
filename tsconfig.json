@@ -9,5 +9,5 @@
     "types": ["bun", "node"],
     "noEmit": true
   },
-  "include": ["proof/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "proof/**/*.ts", "tests/**/*.ts"]
 }

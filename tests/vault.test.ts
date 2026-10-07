@@ -13,18 +13,18 @@ import { v2 } from "nostr-tools/nip44"
 import { encrypt } from "nostr-tools/nip04"
 import { unwrapEvent, wrapEvent } from "nostr-tools/nip59"
 import {
-  ProofClient,
+  SignerClient,
   VERSION,
   parseRequest,
   verifiedResult,
   type Request,
   type Response,
-} from "../proof/protocol"
-import { ProofVault } from "../proof/vault"
+} from "../src/protocol"
+import { DATABASE, SignerVault } from "../src/vault"
 
 async function setup() {
   const factory = new IDBFactory()
-  const vault = new ProofVault(factory)
+  const vault = new SignerVault(factory)
   const secret = generateSecretKey()
   const encoded = nsecEncode(secret)
   await vault.import(encoded)
@@ -143,7 +143,7 @@ describe("disposable separate-origin signer proof", () => {
   })
   test("imports, restores from IndexedDB and returns a complete verified event", async () => {
     const s = await setup()
-    const restored = new ProofVault(s.factory)
+    const restored = new SignerVault(s.factory)
     expect(
       JSON.stringify(await restored.binding()) === JSON.stringify(s.binding),
     ).toBe(true)
@@ -189,7 +189,7 @@ describe("disposable separate-origin signer proof", () => {
   })
   test("logout removes storage for other views and reimport changes authority", async () => {
     const s = await setup()
-    const other = new ProofVault(s.factory)
+    const other = new SignerVault(s.factory)
     expect((await s.vault.handle(s.request({ method: "logout" }))).ok).toBe(
       true,
     )
@@ -254,7 +254,7 @@ describe("disposable separate-origin signer proof", () => {
         throw new Error("blocked")
       },
     } as unknown as IDBFactory
-    const vault = new ProofVault(factory)
+    const vault = new SignerVault(factory)
     const req = {
       version: VERSION,
       id: "1",
@@ -267,6 +267,88 @@ describe("disposable separate-origin signer proof", () => {
     expect(response.ok).toBe(false)
     expect(response.error).toBe("unavailable")
     expect("value" in response).toBe(false)
+  })
+  test("failed persistence never reports an import; failed logout revokes local authority", async () => {
+    const s = await setup()
+    let failWrites = true
+    const factory = {
+      open: (...args: Parameters<IDBFactory["open"]>) => {
+        const request = s.factory.open(...args)
+        request.addEventListener("success", () => {
+          const db = request.result
+          const original = db.transaction.bind(db)
+          db.transaction = ((
+            ...args: Parameters<IDBDatabase["transaction"]>
+          ) => {
+            const tx = original(...args)
+            if (failWrites && args[1] === "readwrite") tx.abort()
+            return tx
+          }) as IDBDatabase["transaction"]
+        })
+        return request
+      },
+    } as unknown as IDBFactory
+    const vault = new SignerVault(factory)
+    await expect(vault.import(s.encoded)).rejects.toThrow("unavailable")
+    expect((await s.vault.binding())?.revision).toBe(s.binding.revision)
+    await expect(vault.logout()).rejects.toThrow("unavailable")
+    await expect(vault.binding()).rejects.toThrow("unavailable")
+    failWrites = false
+    await vault.logout()
+    expect(await s.vault.binding()).toBe(null)
+    s.secret.fill(0)
+  })
+  test("corrupt records are unavailable and can be removed; stalled storage is bounded", async () => {
+    const s = await setup()
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const req = s.factory.open(DATABASE, 1)
+      req.onsuccess = () => resolve(req.result)
+    })
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction("record", "readwrite")
+      tx.objectStore("record").put({ revision: null }, "active")
+      tx.oncomplete = () => resolve()
+    })
+    db.close()
+    await expect(s.vault.binding()).rejects.toThrow("unavailable")
+    await s.vault.logout()
+    expect(await s.vault.binding()).toBe(null)
+    const stalled = new SignerVault(
+      { open: () => ({}) } as unknown as IDBFactory,
+      10,
+    )
+    await expect(stalled.binding()).rejects.toThrow("unavailable")
+    s.secret.fill(0)
+  })
+  test("revocation while a real signature is awaiting durable recheck suppresses the result", async () => {
+    const s = await setup()
+    let resume!: () => void
+    let reached!: () => void
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    const ready = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    class PausedVault extends SignerVault {
+      override async binding() {
+        reached()
+        await paused
+        return super.binding()
+      }
+    }
+    const vault = new PausedVault(s.factory)
+    const pending = vault.handle({
+      ...s.request({ method: "signEvent", event: s.event }),
+      frame: vault.frame,
+    })
+    await ready
+    await s.vault.logout()
+    resume()
+    const result = await pending
+    expect(result.error).toBe("authority_changed")
+    expect("value" in result).toBe(false)
+    s.secret.fill(0)
   })
   test("request contract rejects raw key APIs, unknown fields, invalid events and bounds", async () => {
     const s = await setup()
@@ -303,7 +385,7 @@ describe("proof request lifecycle", () => {
   })
   function harness(timeout = 1000) {
     let sent: Request
-    const client = new ProofClient((req) => {
+    const client = new SignerClient((req) => {
       sent = req
     }, timeout)
     const secret = generateSecretKey()
@@ -324,6 +406,49 @@ describe("proof request lifecycle", () => {
       })
     return { client, binding, frame, reply, getSent: () => sent, secret }
   }
+  test("change notification during status cancels the handshake and fences its late response", async () => {
+    const h = harness()
+    const pending = h.client.request({ method: "status" }).catch((e) => e.code)
+    const sent = h.getSent()
+    expect(
+      h.client.receiveChange({
+        version: VERSION,
+        changed: true,
+        frame: h.frame,
+        channel: "wrong",
+      }),
+    ).toBe(false)
+    expect(
+      h.client.receiveChange({
+        version: VERSION,
+        changed: true,
+        frame: h.frame,
+        channel: sent.channel,
+      }),
+    ).toBe(true)
+    h.reply()
+    expect(await pending).toBe("authority_changed")
+    expect(h.client.binding).toBe(null)
+    h.secret.fill(0)
+  })
+  test("AbortSignal invalidates pending operation authority and rejects late results", async () => {
+    const h = harness()
+    const connected = h.client.request({ method: "status" })
+    h.reply()
+    await connected
+    const abort = new AbortController()
+    const pending = h.client
+      .request(
+        { method: "encryptNip44", peer: h.binding.pubkey, text: "test" },
+        abort.signal,
+      )
+      .catch((e) => e.code)
+    abort.abort()
+    h.reply({ value: "late" })
+    expect(await pending).toBe("authority_changed")
+    expect(h.client.binding).toBe(null)
+    h.secret.fill(0)
+  })
   test("correlation and channel ignore unsolicited or stale responses", async () => {
     const h = harness()
     const pending = h.client.request({ method: "status" })

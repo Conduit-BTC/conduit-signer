@@ -8,14 +8,16 @@
     "bun": ">=1.3.12"
   },
   "scripts": {
-    "dev": "bun proof/server.ts",
+    "dev": "bun proof/server.ts --harness",
     "build": "bun proof/server.ts --build",
     "test": "bun test tests",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint proof tests",
+    "lint": "eslint src proof tests",
     "format:check": "prettier --check .",
     "test:browser": "playwright test --config proof/playwright.config.ts",
-    "test:browser:diagnostic": "PROOF_BROWSER_DIAGNOSTIC=offline-emulation playwright test --config proof/playwright.config.ts"
+    "test:browser:diagnostic": "PROOF_BROWSER_DIAGNOSTIC=offline-emulation playwright test --config proof/playwright.config.ts",
+    "build:harness": "bun proof/server.ts --build --harness",
+    "build:preview": "bun proof/server.ts --build --preview"
   },
   "dependencies": {
     "nostr-tools": "2.25.2"

@@ -1,91 +1,97 @@
-import { generateSecretKey } from "nostr-tools/pure"
-import { nsecEncode } from "nostr-tools/nip19"
-import { parseRequest, VERSION, type Request } from "./protocol"
-import { ProofVault } from "./vault"
+import { parseRequest, VERSION, SignerError, type Request } from "./protocol"
+import { SignerVault } from "./vault"
 
-const vault = new ProofVault()
+const vault = new SignerVault()
 const origins = JSON.parse(document.body.dataset.parents!) as string[]
 const state = document.querySelector<HTMLOutputElement>("#state")!
 const input = document.querySelector<HTMLInputElement>("#nsec")!
-const channel = new BroadcastChannel("conduit-disposable-signer-proof")
+const form = document.querySelector<HTMLFormElement>("#import")!
+const forget = document.querySelector<HTMLButtonElement>("#forget")!
+const channel = new BroadcastChannel("conduit-signer")
 let parentOrigin: string | null = null
 let activeChannel: string | null = null
 let stopped = false
 let active = false
+let mutating = false
 let generation = 0
 const seen = new Set<string>()
 
-const notifyParent = () => {
-  if (parentOrigin)
+function invalidate() {
+  generation++
+  active = false
+  if (parentOrigin && activeChannel)
     window.parent.postMessage(
-      { version: VERSION, changed: true, frame: vault.frame },
+      {
+        version: VERSION,
+        changed: true,
+        frame: vault.frame,
+        channel: activeChannel,
+      },
       parentOrigin,
     )
+  activeChannel = null
 }
 async function refresh() {
   try {
-    state.textContent = (await vault.binding())
+    const binding = await vault.binding()
+    state.textContent = binding
       ? "Stored record available. Ready for signing."
-      : "No stored record. Import a disposable key."
+      : "No stored record. Import your existing NSEC to connect."
+    form.hidden = !!binding
+    forget.hidden = !binding
   } catch {
-    state.textContent = "Storage unavailable. Feasibility has not passed."
+    form.hidden = false
+    forget.hidden = false
+    state.textContent =
+      "Storage unavailable. Signing is unavailable. Retry when storage is available, or reimport after this signer's website data is cleared."
   }
 }
 channel.onmessage = () => {
-  generation++
-  active = false
-  activeChannel = null
-  notifyParent()
+  vault.invalidate()
+  invalidate()
   void refresh()
 }
 document.querySelector("#origin")!.textContent = location.origin
-document.querySelector<HTMLButtonElement>("#fixture")!.onclick = () => {
-  // Test fixture only: this control is never part of the proposed product UI.
-  const secret = generateSecretKey()
-  try {
-    input.value = nsecEncode(secret)
-    state.textContent = "Disposable fixture prepared. Import it below."
-  } finally {
-    secret.fill(0)
-  }
-}
-document.querySelector<HTMLFormElement>("#import")!.onsubmit = async (
-  event,
-) => {
+form.onsubmit = async (event) => {
   event.preventDefault()
-  if (!document.querySelector<HTMLInputElement>("#disposable")!.checked) return
+  if (mutating || stopped) return
   const nsec = input.value
   input.value = ""
+  mutating = true
   generation++
   active = false
-  activeChannel = null
-  notifyParent()
   try {
     await vault.import(nsec)
-    activeChannel = null
-    notifyParent()
     channel.postMessage("changed")
     await refresh()
-  } catch {
+  } catch (e) {
     state.textContent =
-      "Import failed. Use a disposable nsec; storage must be available."
+      e instanceof SignerError && e.code === "unavailable"
+        ? "Import could not be saved. Storage unavailable. Retry when storage is available."
+        : "Invalid NSEC. Enter an existing Nostr secret key."
+  } finally {
+    mutating = false
+    invalidate()
   }
 }
-document.querySelector<HTMLButtonElement>("#forget")!.onclick = async () => {
+forget.onclick = async () => {
+  if (mutating || stopped) return
+  input.value = ""
+  mutating = true
   generation++
   active = false
-  activeChannel = null
-  notifyParent()
   try {
     await vault.logout()
     channel.postMessage("changed")
     await refresh()
   } catch {
     state.textContent =
-      "Could not remove storage. Close this view and clear this signer's website data."
+      "Logout could not remove the stored record. Signing is unavailable in this view. Retry logout when storage is available."
+  } finally {
+    mutating = false
+    invalidate()
   }
 }
-
 function isParent(event: MessageEvent): boolean {
   return (
     window.parent !== window &&
@@ -95,7 +101,7 @@ function isParent(event: MessageEvent): boolean {
   )
 }
 window.addEventListener("message", async (event) => {
-  if (stopped || !isParent(event)) return
+  if (stopped || mutating || !isParent(event)) return
   const req = parseRequest(event.data)
   if (
     !req ||
@@ -109,10 +115,8 @@ window.addEventListener("message", async (event) => {
     activeChannel = req.channel
   } else if (event.origin !== parentOrigin || req.channel !== activeChannel)
     return
-  // One bounded request at a time; no unbounded signing queue or replay ledger.
   if (seen.size >= 512) {
-    activeChannel = null
-    notifyParent()
+    invalidate()
     return
   }
   seen.add(req.id)
@@ -124,15 +128,16 @@ window.addEventListener("message", async (event) => {
     return
   active = false
   window.parent.postMessage(response, event.origin)
-  if (req.method === "logout" && response.ok) {
-    activeChannel = null
-    channel.postMessage("changed")
-    await refresh()
+  if (req.method === "logout") {
+    invalidate()
+    if (response.ok) channel.postMessage("changed")
   }
+  if (req.method === "logout" || !response.ok) await refresh()
 })
 window.addEventListener("pagehide", () => {
   stopped = true
-  activeChannel = null
+  vault.invalidate()
+  invalidate()
   input.value = ""
   channel.close()
 })
@@ -145,10 +150,10 @@ if ("serviceWorker" in navigator) {
     .register("/sw.js")
     .then(() => {
       document.querySelector("#offline")!.textContent =
-        "Offline cache registration complete; verify an offline relaunch."
+        "Available offline after this page is cached."
     })
     .catch(() => {
       document.querySelector("#offline")!.textContent =
-        "Offline cache unavailable in this context."
+        "Offline page loading is unavailable in this context."
     })
 }

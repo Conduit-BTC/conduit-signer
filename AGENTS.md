@@ -1,8 +1,9 @@
 # Conduit Signer
 
-This MIT-licensed repository owns a disposable-key, separate-origin feasibility
-prototype. It is not released for real account keys. Do not merge, deploy,
-release, change access or use real keys without explicit maintainer authority.
+This MIT-licensed repository owns the embedded existing-NSEC signer utility.
+The supported surface owns import, automatic restoration and explicit logout.
+Production release, deployment, access changes and real-key validation require
+explicit maintainer authority. Test harnesses use runtime-generated identities.
 
 ## Boundary
 
@@ -11,15 +12,15 @@ release, change access or use real keys without explicit maintainer authority.
   status/public key, verified signing results, NIP-44 results, legacy NIP-04
   decrypt results and logout status. No raw-key import/export RPC.
 - Market/Merchant origins and services must never receive a key, backup or
-  material that independently unwraps it. No relay or wallet access in the proof.
+  material that independently unwraps it. No relay or wallet transport here.
 - Validate exact parent/signer origin, source window, request/channel/frame IDs
   and account/revision binding. Keep bounded timeouts and cancellation. Fail
   closed on stale authority, malformed results or unavailable storage.
-- Runtime disposable fixtures are approved only in the isolated signer-frame
+- Runtime disposable fixtures are approved only in the isolated `proof/fixture.ts` signer-frame
   test control and unit-test process, using `generateSecretKey` from
   `nostr-tools/pure`. No fixed keys, scalars or encoded credentials; no diagnostic,
   export or network sink. Never alias encoding to evade a guard. The fixture
-  control is development equipment and must be removed from production UI.
+  control is included only with `--harness`, never the supported signer build.
 - Keep evidence content-free. No key, identity, plaintext, ciphertext, invoice,
   order/message data, browser trace, video or populated-input screenshot.
 
@@ -30,10 +31,10 @@ at the exact approved origins, including persistence, signing, NIP-44, frame
 replacement, termination/relaunch, offline/online and logout/reimport. Record
 device/iOS and separate imports. Desktop browsers cannot pass this gate.
 
-After feasibility and security review, adapt the local provider to the existing
+For composed preview development, adapt the local provider to the existing
 Conduit AccountSigner/SessionSigner owner. Preserve auth authority fencing,
 pending-operation cancellation, protected-read eligibility and shared NIP-17/
-NIP-59 behavior. The proof client is not a new production session owner. Installed
+NIP-59 behavior. The embedded transport is not a new account/session owner. Installed
 mode is a UX gate. Existing-key import and automatic restoration are the scope;
 account creation, unlock ceremonies, onboarding, wallet rollout and settings
 sync are separate work. No routine per-action approval or at-rest security claim.

@@ -13,7 +13,7 @@ export type Failure =
   | "timeout"
   | "invalid_response"
   | "authority_changed"
-export class ProofError extends Error {
+export class SignerError extends Error {
   constructor(readonly code: Failure) {
     super(code)
   }
@@ -150,8 +150,8 @@ export function verifiedResult(v: unknown, draft: UnsignedEvent): v is Event {
   }
 }
 
-/** Dev proof transport only. Production must adapt to the existing SessionSigner. */
-export class ProofClient {
+/** Correlated embedded transport. App authority remains with AccountSigner/SessionSigner. */
+export class SignerClient {
   private channel = crypto.randomUUID()
   private status: Status | null = null
   private closed = false
@@ -160,21 +160,44 @@ export class ProofClient {
     {
       request: Request
       resolve: (v: unknown) => void
-      reject: (e: ProofError) => void
+      reject: (e: SignerError) => void
       timer: ReturnType<typeof setTimeout>
+      cleanup: () => void
     }
   >()
   constructor(
     private readonly send: (v: Request) => void,
     private readonly timeout = 3000,
   ) {}
+  get snapshot(): Status | null {
+    return this.status ? structuredClone(this.status) : null
+  }
+  receiveChange(v: unknown): boolean {
+    if (
+      !isRecord(v) ||
+      Object.keys(v).sort().join() !== "changed,channel,frame,version" ||
+      v.version !== VERSION ||
+      v.changed !== true ||
+      v.channel !== this.channel ||
+      !(
+        v.frame === this.status?.frame ||
+        (this.status === null &&
+          isToken(v.frame) &&
+          [...this.pending.values()].some((p) => p.request.method === "status"))
+      )
+    )
+      return false
+    this.reset()
+    return true
+  }
   get binding() {
     return this.status?.binding ?? null
   }
   private cancelPending() {
     for (const p of this.pending.values()) {
       clearTimeout(p.timer)
-      p.reject(new ProofError("authority_changed"))
+      p.cleanup()
+      p.reject(new SignerError("authority_changed"))
     }
     this.pending.clear()
   }
@@ -199,8 +222,9 @@ export class ProofClient {
     if (!p) return
     this.pending.delete(v.id)
     clearTimeout(p.timer)
+    p.cleanup()
     const fail = (code: Failure) => {
-      p.reject(new ProofError(code))
+      p.reject(new SignerError(code))
       this.reset()
     }
     if (
@@ -221,6 +245,12 @@ export class ProofClient {
       !isBinding(v.binding) ||
       typeof v.ok !== "boolean" ||
       (p.request.frame !== null && v.frame !== p.request.frame)
+    )
+      return fail("invalid_response")
+    if (
+      (!v.ok && (v.binding !== null || "value" in v)) ||
+      (v.ok &&
+        ("error" in v || (p.request.method === "status" && "value" in v)))
     )
       return fail("invalid_response")
     if (!v.ok) {
@@ -255,10 +285,12 @@ export class ProofClient {
       p.resolve(v.value)
     }
   }
-  request(op: Operation): Promise<unknown> {
-    if (this.closed) return Promise.reject(new ProofError("disconnected"))
+  request(op: Operation, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted)
+      return Promise.reject(new SignerError("authority_changed"))
+    if (this.closed) return Promise.reject(new SignerError("disconnected"))
     if (op.method !== "status" && !this.status?.binding)
-      return Promise.reject(new ProofError("disconnected"))
+      return Promise.reject(new SignerError("disconnected"))
     // Status is a connection handshake, never an implicit account switch.
     if (op.method === "status") this.reset()
     if (op.method === "logout") this.cancelPending()
@@ -271,20 +303,25 @@ export class ProofClient {
       binding: this.status?.binding ?? null,
     }) as Request
     if (!parseRequest(request))
-      return Promise.reject(new ProofError("invalid_response"))
+      return Promise.reject(new SignerError("invalid_response"))
     return new Promise((resolve, reject) => {
+      const aborted = () => this.reset()
+      const cleanup = () => signal?.removeEventListener("abort", aborted)
+      signal?.addEventListener("abort", aborted, { once: true })
       const timer = setTimeout(() => {
+        cleanup()
         this.pending.delete(request.id)
-        reject(new ProofError("timeout"))
+        reject(new SignerError("timeout"))
         this.reset()
       }, this.timeout)
-      this.pending.set(request.id, { request, resolve, reject, timer })
+      this.pending.set(request.id, { request, resolve, reject, timer, cleanup })
       try {
         this.send(request)
       } catch {
+        cleanup()
         clearTimeout(timer)
         this.pending.delete(request.id)
-        reject(new ProofError("unavailable"))
+        reject(new SignerError("unavailable"))
         this.reset()
       }
     })

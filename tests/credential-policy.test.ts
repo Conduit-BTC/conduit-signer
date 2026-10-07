@@ -207,7 +207,7 @@ function encodingAllowed(file: string, source: string): boolean {
           ts.forEachChild(body, before)
           if (keyReferences !== 1) valid = false
         }
-        if (file === "proof/signer.ts") {
+        if (file === "proof/signer.ts" || file === "proof/fixture.ts") {
           const sink = node.parent
           if (
             !ts.isBinaryExpression(sink) ||
@@ -326,7 +326,7 @@ describe("disposable fixture policy", () => {
   test("tracked proof and test source obey the exception without fixed credentials", async () => {
     let count = 0
     const findings: Finding[] = []
-    for (const area of ["proof", "tests"]) {
+    for (const area of ["src", "proof", "tests"]) {
       for await (const file of new Bun.Glob(`${area}/**/*.ts`).scan({
         onlyFiles: true,
       })) {

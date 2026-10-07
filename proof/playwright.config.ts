@@ -16,7 +16,7 @@ export default defineConfig({
     { name: "webkit", use: { browserName: "webkit" } },
   ],
   webServer: {
-    command: "bun proof/server.ts",
+    command: "bun proof/server.ts --harness",
     cwd: "..",
     url: "http://localhost:7030",
     reuseExistingServer: false,

@@ -1,57 +1,53 @@
 # Conduit Signer
 
-MIT-licensed separate-origin Nostr signer feasibility prototype.
+MIT-licensed embedded utility for an existing Nostr NSEC, hosted on a separate
+origin. The signer owns input validation, IndexedDB persistence, automatic
+restoration, key operations and explicit logout. The connected app receives only
+public identity and operation results. There is no identity creation, key export,
+password, recovery flow or routine operation approval.
 
-This is a **development experiment**, not a production signer or an enabled
-Market/Merchant authentication method. Use disposable keys only. It has no relay
-or wallet access. It does not change `AccountSigner`, `SessionSigner`, the auth
-provider, protected reads, or shared connection UI. This repository owns the
-standalone proof. Production use requires an approved origin, physical-device
-feasibility evidence and maintainer security review.
+This prepares the supported utility; it does not activate Market/Merchant auth,
+provision a hostname, deploy, or establish physical iPhone persistence. Production
+requires maintainer security review and exact-origin device evidence. Validation
+uses runtime-generated test identities.
 
-The two parent surfaces are minimal installed-app storage probes. They are not
-the composed Market/Merchant applications. Their passing results cannot satisfy
-app integration acceptance or substitute for a physical iPhone check at the exact
-approved intended origins.
-
-## Run locally
-
-From this repository root, using its locked dependencies:
+## Supported surface and test harness
 
 ```sh
 bun install --frozen-lockfile
-bun run dev
+bun run build          # supported signer only: dist/signer
+bun run dev            # local harness: parents 7030/7031, signer 7032
+bun run build:harness  # test equipment only: dist/harness/{market,merchant,signer}
 ```
 
-Open `http://localhost:7030` for the Market probe and
-`http://localhost:7031` for Merchant. The embedded signer is
-`http://localhost:7032`. The server binds loopback only. Stop it with Ctrl-C.
+The supported signer page asks for an **Existing NSEC** and offers **Import NSEC**.
+The input clears before the asynchronous storage write. Invalid input never
+replaces a stored account. Import succeeds only after durable storage completes.
+A stored account restores automatically and hides the import form. **Log out and
+remove key** deletes the record and revokes live views in the same storage
+partition. Storage failure is shown as unavailable, never a successful import or
+logout. After logout or storage loss, import the existing NSEC again.
 
-1. In the signer frame, select **Prepare disposable import**. This generates a
-   runtime test fixture only, fills the password field, and does not print or
-   export it. This control must never become product key-creation UI.
-2. Confirm disposable use and select **Import test key**. The input clears before
-   the asynchronous storage write. Alternatively, enter an independently prepared
-   disposable nsec directly in that frame. Never enter a real account key.
-3. Select **Check status**, **Verify signing**, and **Verify NIP-44** in the parent.
-   Results contain pass/fail text, never identities or payloads. Signing verifies
-   the exact template, hash and signature; NIP-44 runs a self round trip.
-4. Replace the frame, reload, test offline/online, and check again. Log out, then
-   reload and verify that import is required. The signer-owned **Forget local
-   test key** button also deletes the stored record if the parent is disconnected.
+The local parent probes at `http://localhost:7030` and `http://localhost:7031`
+embed `http://localhost:7032`. They include pass/fail controls and a signer-side
+**Prepare disposable import** fixture button. These exist only with `--harness`.
+The probes consume the supported `EmbeddedSigner` endpoint, not a separate test
+transport. The supported build contains no fixture code or parent probe assets;
+each build replaces its generated signer directory to remove stale test assets.
 
-The signer stores raw disposable key bytes in its own IndexedDB. Automatic
-restore is deliberately tested without an unlock ceremony. This provides no
-password-based or hardware-backed at-rest claim. Keys are read per operation and
-byte buffers are cleared afterwards; JavaScript cannot guarantee forensic memory
-erasure. No key or wrapping key is stored in a parent origin. No import/export
-operation exists in the message contract.
+The signer stores raw key bytes in its own IndexedDB, with no independent unlock
+or at-rest protection claim. No key or wrapping capability lives in the parent.
+Keys are read per operation and cleared afterwards; logout, cross-view changes
+and frame shutdown invalidate pending work and clear active buffers. JavaScript,
+browser copies and device backups prevent forensic-erasure guarantees.
 
-The installed-mode indicator is observational. The proof intentionally remains
-accessible in Safari to test both contexts; production's installed-only option
-is a later shared-UI UX gate.
+The supported database is `conduit-signer`. Experimental PR #1 records in
+`conduit-disposable-signer-proof` are deliberately not promoted: reimport the test
+identity and remove the old test-origin data separately. Safari and installed
+PWAs, and Market/Merchant partitions, may require separate imports and logouts.
+Installed-only presentation belongs to the monorepo shared UI and is a UX gate.
 
-## Repeatable local validation
+## Validation
 
 ```sh
 bun test
@@ -63,19 +59,23 @@ bun run test:browser:diagnostic
 bun run build
 ```
 
-Strict TypeScript covers the browser proof, static server, tests and Playwright.
-The crypto dependency is pinned to `nostr-tools` 2.25.2. Subpath imports restrict
-the signer bundle to event, NIP-19, NIP-44 and legacy NIP-04 decryption code and
-their cryptographic dependencies; it contains no app/UI code or NDK.
+For a scoped authored-history scan, use `CREDENTIAL_BASE_SHA=origin/main bun test`.
+A complete historical scan may exceed Bun's default five-second test budget;
+`bun test --timeout 30000` runs the same assertions with a larger execution budget.
+CI scans the explicit base/head range. No credential content is printed.
 
-Playwright runs Chromium and desktop WebKit without retries, screenshots, video
-or traces. It uses synthetic keys, real cryptography and separate browser
-origins. It is **not** physical iPhone/PWA evidence. No test publishes an event.
-Protocol tests use real runtime disposable keys, including NIP-59 author seals
-and ephemeral gift wraps for unsigned kind-14 and kind-16 rumors, checked against
-independent `nostr-tools` helpers. This standalone prototype does
-not install Conduit account authority or authenticate protected relay reads;
-composed Market/Merchant integration remains gated.
+The only runtime dependency remains pinned `nostr-tools` 2.25.2. Subpath imports
+cover complete verified Nostr events, NIP-44 v2 and decrypt-only legacy NIP-04.
+Tests interoperate with an independent peer and NIP-59 kind-14/kind-16 envelopes;
+no event is published. NIP-44 v3 remains gated on public draft/client references
+and explicit capability detection.
+
+Chromium and desktop WebKit use real crypto and distinct origins, with no retries,
+traces, screenshots or videos. Tests cover ordinary input, failed persistence,
+reload/restore, frame/account replacement, cross-view logout, cancellation,
+malformed/stale responses and actual server outages. They are not physical
+Safari/Home Screen evidence or composed Market/Merchant coverage. See
+[INTEGRATION.md](INTEGRATION.md) for the exact existing-protocol adapter handoff.
 
 ### Observed desktop limitation
 
@@ -93,27 +93,27 @@ NIP-44, frame replacement, closing/reopening a page, logout and reimport while
 the servers remain stopped. Loaded-page network emulation remains in the normal
 lifecycle checks. Browser page reopening is not iOS process termination.
 
-Runtime disposable fixture generation is a narrowly scoped development
-exception. The fixture button is test equipment; it must be removed before any
-production signer UI is prepared. Static credentials, diagnostic/export/network
+Runtime fixture generation is a narrowly scoped test exception.
+The fixture button is absent from the supported signer UI. Static credentials, diagnostic/export/network
 sinks and real account keys are prohibited. See [repository guidance](AGENTS.md).
 
 ## Prepare an approved exact-origin device candidate
 
-Do not deploy this experiment without explicit approval. First record three
+Do not deploy this utility without explicit approval. First record three
 approved HTTPS origins and the approved hosting target. An illustrative signer
 hostname is not approval or provisioning evidence. No production host should be
 overwritten by these probe shells.
 
 Set `PROOF_MARKET_ORIGIN`, `PROOF_MERCHANT_ORIGIN` and `PROOF_SIGNER_ORIGIN` to
-those exact origins, then run the build command. Values must be origins only:
+those exact origins, then run `bun run build:preview`. This command fails unless all three explicit
+HTTPS origins are provided. Values must be origins only:
 no path, query, credentials, wildcard or trailing slash. Defaults are local test
 origins and must not be used as iPhone evidence.
 
-The command creates three **separate** artifact directories under
-`dist/{market,merchant,signer}`. Each directory contains
-only its own static page/script, style, offline worker and `_headers`; parent
-directories also contain a PWA manifest/icon. Do not combine them under one origin.
+The command creates only `dist/signer`, with its static page/script, style,
+offline worker and `_headers`. Deploy only that directory to the verified signer
+hosting target. Parent probe artifacts require `build:harness` and must never
+replace actual Market/Merchant applications. Do not combine origins.
 The output is ignored by Git and is not part of normal app builds. The command
 does not deploy. The `_headers` file requires a host that enforces it; for another
 host apply equivalent response headers explicitly and verify them before use.
@@ -138,8 +138,7 @@ installed Merchant. Install each parent through Safari's Add to Home Screen and
 launch its own icon; verify **Installed mode observed**. The two probes test the
 origin/storage hypothesis. Before claiming the product gate passed, repeat the
 same checks in actual installed Market/Merchant shells on those same approved
-origins using a reviewed test-only embedding surface. That integration is still
-gated; do not equate a renamed probe icon with the real application.
+origins using a reviewed test-only embedding surface. Composed preview integration has separate scope; do not equate a renamed probe icon with the real application.
 
 For **each** context:
 
@@ -191,7 +190,7 @@ contents, console payloads or remote-inspector dumps.
 
 ## Decision rule
 
-Passing browser tests establishes only local supporting evidence. Full integration
+Passing browser tests establishes only local supporting evidence. Production activation
 requires physical exact-origin persistence, a reviewed storage/logout explanation,
 maintainer security sign-off, and a stable merged app base.
 
@@ -232,7 +231,7 @@ context must not be required. Human review remains necessary.
 
 ## Acceptance evidence
 
-| ID    | Standalone proof evidence                                                                                        | Remaining gate                                                                                                     |
+| ID    | Utility and harness evidence                                                                                     | Remaining gate                                                                                                     |
 | ----- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | LS-01 | Browser/standalone indicator and signer-owned import                                                             | Actual shared UI, installed-only option, external signer/browsing regressions and physical screenshots             |
 | LS-02 | Exact origin/source contract, strict CSP, parent storage isolation, no raw-key RPC, locked dependencies          | Exact approved HTTPS origins, hosted headers/logging and security/release review                                   |
