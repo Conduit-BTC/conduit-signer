@@ -738,3 +738,113 @@ for (const removal of ["frame", "containing view"] as const) {
     })
   })
 }
+
+test("long restored session keeps real crypto and logout available across replay windows", async ({
+  page,
+}) => {
+  test.setTimeout(60000)
+  await page.goto("http://localhost:7030")
+  const frame = page.frameLocator("iframe")
+  await frame.getByRole("button", { name: "Prepare disposable import" }).click()
+  await frame.getByRole("button", { name: "Import NSEC" }).click()
+  await expect(page.locator("#result")).toContainText("Connected")
+  await page.reload()
+  await expect(page.locator("#result")).toContainText("Connected")
+  const signer = page
+    .frames()
+    .find((f) => f.url() === "http://localhost:7032/")!
+  // Capture two operations for replay inside the test process only. Nothing is
+  // logged or returned except counts and booleans; no fixture key leaves its frame.
+  await signer.evaluate(() => {
+    const root = window as Window & {
+      capturedRequest?: unknown
+      recentRequest?: unknown
+    }
+    window.addEventListener("message", (event) => {
+      if (
+        event.origin === "http://localhost:7030" &&
+        event.source === window.parent &&
+        event.data?.method === "encryptNip44"
+      ) {
+        root.capturedRequest ??= structuredClone(event.data)
+        root.recentRequest = structuredClone(event.data)
+      }
+    })
+  })
+  const outcome = await page.evaluate(async () => {
+    const root = window as Window & {
+      harness?: EmbeddedSigner
+      replayReplies?: Map<string, number>
+    }
+    const endpoint = root.harness!
+    const before = endpoint.binding!
+    root.replayReplies = new Map()
+    window.addEventListener("message", (event) => {
+      if (
+        event.origin !== "http://localhost:7032" ||
+        event.source !== document.querySelector("iframe")?.contentWindow ||
+        typeof event.data?.value !== "string"
+      )
+        return
+      root.replayReplies!.set(
+        event.data.id,
+        (root.replayReplies!.get(event.data.id) ?? 0) + 1,
+      )
+    })
+    let completed = 0
+    for (let n = 0; n < 768; n++) {
+      const text = "Synthetic round trip. Never published."
+      const encrypted = (await endpoint.request({
+        method: "encryptNip44",
+        peer: before.pubkey,
+        text,
+      })) as string
+      const decrypted = await endpoint.request({
+        method: "decryptNip44",
+        peer: before.pubkey,
+        text: encrypted,
+      })
+      if (decrypted !== text) throw new Error("round trip failed")
+      completed += 2
+    }
+    return {
+      completed,
+      sameAuthority: endpoint.binding?.revision === before.revision,
+    }
+  })
+  expect(outcome).toEqual({ completed: 1536, sameAuthority: true })
+  await expect(page.locator("#result")).toContainText("Connected")
+  // Neither an old-channel replay nor a current-channel duplicate may execute.
+  await signer.evaluate(() => {
+    const root = window as Window & {
+      capturedRequest?: unknown
+      recentRequest?: unknown
+    }
+    for (const data of [root.capturedRequest, root.recentRequest])
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data,
+          origin: "http://localhost:7030",
+          source: window.parent,
+        }),
+      )
+  })
+  // A current successful operation acts as an ordering barrier for the replay.
+  await page.getByRole("button", { name: "Verify signing" }).click()
+  await expect(page.locator("#result")).toContainText("PASS: exact template")
+  expect(
+    await page.evaluate(() =>
+      [
+        ...(
+          window as Window & { replayReplies?: Map<string, number> }
+        ).replayReplies!.values(),
+      ].every((count) => count === 1),
+    ),
+  ).toBe(true)
+  await page.getByRole("button", { name: "Log out signer" }).click()
+  await expect(page.locator("#result")).toContainText("Logged out")
+  await expect(frame.locator("#state")).toContainText("No stored record")
+  await page.reload()
+  await expect(frame.locator("#state")).toContainText("No stored record")
+  await expect(page.locator("#result")).toContainText("Disconnected")
+})

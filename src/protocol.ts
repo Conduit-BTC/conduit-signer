@@ -7,6 +7,8 @@ import {
 
 export const VERSION = "conduit-signer-proof-1"
 export const MAX_TEXT = 65_535
+// One slot remains available for explicit logout while the channel renews.
+export const MAX_CHANNEL_REQUESTS = 512
 export type Failure =
   | "disconnected"
   | "unavailable"
@@ -155,10 +157,14 @@ export class SignerClient {
   private channel = crypto.randomUUID()
   private status: Status | null = null
   private closed = false
+  private cancellation = 0
+  private sent = 0
+  private renewing: Promise<unknown> | null = null
   private pending = new Map<
     string,
     {
       request: Request
+      expectedStatus?: Status
       resolve: (v: unknown) => void
       reject: (e: SignerError) => void
       timer: ReturnType<typeof setTimeout>
@@ -194,6 +200,7 @@ export class SignerClient {
     return this.status?.binding ?? null
   }
   private cancelPending() {
+    this.cancellation++
     for (const p of this.pending.values()) {
       clearTimeout(p.timer)
       p.cleanup()
@@ -204,6 +211,8 @@ export class SignerClient {
   reset() {
     this.channel = crypto.randomUUID()
     this.status = null
+    this.sent = 0
+    this.renewing = null
     this.cancelPending()
   }
   close() {
@@ -267,6 +276,12 @@ export class SignerClient {
     }
     const req = p.request
     if (req.method === "status") {
+      if (
+        p.expectedStatus &&
+        (v.frame !== p.expectedStatus.frame ||
+          !sameBinding(v.binding, p.expectedStatus.binding))
+      )
+        return fail("authority_changed")
       this.status = { frame: v.frame, binding: v.binding }
       p.resolve(this.status)
     } else if (req.method === "logout") {
@@ -286,14 +301,58 @@ export class SignerClient {
     }
   }
   request(op: Operation, signal?: AbortSignal): Promise<unknown> {
-    if (signal?.aborted)
+    if (signal?.aborted) {
+      this.reset()
       return Promise.reject(new SignerError("authority_changed"))
+    }
     if (this.closed) return Promise.reject(new SignerError("disconnected"))
     if (op.method !== "status" && !this.status?.binding)
       return Promise.reject(new SignerError("disconnected"))
+    if (op.method !== "status" && op.method !== "logout") {
+      if (this.renewing || this.sent >= MAX_CHANNEL_REQUESTS - 1) {
+        // Renew only transport correlation. Never adopt another frame/account,
+        // retry an operation, or emit an app account-lifecycle change.
+        const operation = structuredClone(op)
+        if (!this.renewing) {
+          const expected = this.snapshot!
+          this.reset()
+          this.status = expected // Keep bound logout available during renewal.
+          const pending = this.dispatch(
+            { method: "status" },
+            undefined,
+            expected,
+          ).finally(() => {
+            if (this.renewing === pending) this.renewing = null
+          })
+          this.renewing = pending
+        }
+        const cancellation = this.cancellation
+        const renewing = this.renewing
+        const aborted = () => {
+          if (this.cancellation === cancellation) this.reset()
+        }
+        signal?.addEventListener("abort", aborted, { once: true })
+        if (signal?.aborted) aborted()
+        return renewing
+          .then(() => {
+            if (this.cancellation !== cancellation)
+              throw new SignerError("authority_changed")
+            return this.request(operation, signal)
+          })
+          .finally(() => signal?.removeEventListener("abort", aborted))
+      }
+    }
     // Status is a connection handshake, never an implicit account switch.
-    if (op.method === "status") this.reset()
+    if (op.method === "status" && (this.status || this.pending.size))
+      this.reset()
     if (op.method === "logout") this.cancelPending()
+    return this.dispatch(op, signal)
+  }
+  private dispatch(
+    op: Operation,
+    signal?: AbortSignal,
+    expectedStatus?: Status,
+  ): Promise<unknown> {
     const request = structuredClone({
       ...op,
       version: VERSION,
@@ -302,8 +361,10 @@ export class SignerClient {
       frame: this.status?.frame ?? null,
       binding: this.status?.binding ?? null,
     }) as Request
-    if (!parseRequest(request))
+    if (!parseRequest(request)) {
+      this.reset()
       return Promise.reject(new SignerError("invalid_response"))
+    }
     return new Promise((resolve, reject) => {
       const aborted = () => this.reset()
       const cleanup = () => signal?.removeEventListener("abort", aborted)
@@ -314,8 +375,16 @@ export class SignerClient {
         reject(new SignerError("timeout"))
         this.reset()
       }, this.timeout)
-      this.pending.set(request.id, { request, resolve, reject, timer, cleanup })
+      this.pending.set(request.id, {
+        request,
+        expectedStatus,
+        resolve,
+        reject,
+        timer,
+        cleanup,
+      })
       try {
+        this.sent++
         this.send(request)
       } catch {
         cleanup()

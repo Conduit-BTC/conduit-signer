@@ -57,11 +57,14 @@ export class EmbeddedSigner {
     frame.addEventListener("load", this.reload)
     this.observer.observe(frame, { attributes: true, attributeFilter: ["src"] })
   }
-  private invalidate() {
+  private connectionChanged() {
     this.generation++
     this.connecting = null
-    this.client.reset()
     this.changed(null)
+  }
+  private invalidate() {
+    this.client.reset()
+    this.connectionChanged()
   }
   private reload = () => {
     this.loaded = true
@@ -77,7 +80,7 @@ export class EmbeddedSigner {
     )
       return
     if (this.client.receiveChange(event.data)) {
-      this.invalidate()
+      this.connectionChanged()
       void this.connect().catch(() => {})
     } else this.client.receive(event.data)
   }
@@ -141,10 +144,10 @@ export class EmbeddedSigner {
       const result = await this.client.request(operation, signal)
       if (generation !== this.generation)
         throw new SignerError("authority_changed")
-      if (operation.method === "logout") this.invalidate()
+      if (operation.method === "logout") this.connectionChanged()
       return result
     } catch (error) {
-      if (generation === this.generation) this.invalidate()
+      if (generation === this.generation) this.connectionChanged()
       throw error
     }
   }
@@ -154,7 +157,7 @@ export class EmbeddedSigner {
     this.observer.disconnect()
     window.removeEventListener("message", this.receive)
     this.frame.removeEventListener("load", this.reload)
-    this.invalidate()
     this.client.close()
+    this.connectionChanged()
   }
 }

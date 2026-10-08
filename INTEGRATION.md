@@ -65,6 +65,16 @@ checks. Do not add an independent app queue, relay transport or account owner.
 
 ## Logout and failures
 
+Replay suppression is bounded per channel. The endpoint renews correlation through
+`status` before that ledger fills, checks the same frame and account revision,
+and resumes only the operation that has not yet been sent. This is transparent
+to app account authority: it emits no new account installation notification and
+never retries a completed operation. Logout bypasses renewal and retains a
+reserved request slot. A changed binding, failed renewal or cancellation revokes
+the endpoint; the app must use its normal connection-attempt lifecycle.
+`SignerClient` owns wire resets; `EmbeddedSigner` fences DOM/connection attempts
+and reports changes without resetting the wire a second time.
+
 Explicit user logout first revokes app authority synchronously, then calls the
 old bound endpoint's `request({method: "logout"})` for provider cleanup, and closes
 that endpoint after settlement. Keep a captured binding/endpoint for cleanup;

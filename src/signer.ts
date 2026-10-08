@@ -1,4 +1,10 @@
-import { parseRequest, VERSION, SignerError, type Request } from "./protocol"
+import {
+  MAX_CHANNEL_REQUESTS,
+  parseRequest,
+  VERSION,
+  SignerError,
+  type Request,
+} from "./protocol"
 import { SignerVault } from "./vault"
 
 const vault = new SignerVault()
@@ -115,7 +121,7 @@ window.addEventListener("message", async (event) => {
     activeChannel = req.channel
   } else if (event.origin !== parentOrigin || req.channel !== activeChannel)
     return
-  if (seen.size >= 512) {
+  if (seen.size >= MAX_CHANNEL_REQUESTS) {
     invalidate()
     return
   }
